@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
 import { BLOCK_TAGS, rehypeAnnotate } from '../lib/annotate';
 import { findAnchor, rehypeHeadingIds, remarkAlerts } from '../lib/gfm';
-import { blockDiffSource, markdownDiffSource, rehypeDiffMarks } from '../lib/inlineDiff';
+import { LIST_MARKER, blockDiffSource, markdownDiffSource, rehypeDiffMarks, type RemovalParts } from '../lib/inlineDiff';
 import type { DiffInfo } from '../lib/patch';
 import { WordDiff } from './WordDiff';
 
@@ -70,8 +70,6 @@ function MarkdownWordDiff({ oldText, newText }: { oldText: string; newText: stri
   );
 }
 
-const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
-
 /**
  * Prepare source text for an inline word diff inside an already-rendered block:
  * drop block syntax the element itself renders (list markers, heading hashes, quote
@@ -79,8 +77,8 @@ const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
  */
 export function cleanForInline(tag: string, text: string): string {
   if (tag === 'pre') return text.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*(\n|$)/, '').replace(/(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*$/, '');
-  let lines = text.split('\n');
-  if (tag === 'blockquote') lines = lines.map((l) => l.replace(/^\s*>\s?/, ''));
+  // Quote markers belong to the block quote itself or to one around this block.
+  let lines = text.split('\n').map((l) => l.replace(/^(?:[ \t]*>)+[ \t]?/, ''));
   if (/^h[1-6]$/.test(tag)) lines = lines.map((l) => l.replace(/^\s*#{1,6}\s+/, '').replace(/\s+#+\s*$/, ''));
   const out: string[] = [];
   for (const raw of lines) {
@@ -101,6 +99,15 @@ const VOID_TAGS = new Set(['hr']);
 
 const idxList = (v: unknown): number[] =>
   v === undefined || v === null || v === '' ? [] : String(v).split(' ').map(Number);
+
+/** "removal:from:to" entries (data-mod-part) → this block's share of replacements spanning several blocks. */
+const partMap = (v: unknown): RemovalParts =>
+  new Map(
+    (v === undefined || v === null || v === '' ? [] : String(v).split(' ')).map((s) => {
+      const [i, from, to] = s.split(':').map(Number);
+      return [i, [from, to]];
+    }),
+  );
 
 /** Frontmatter (YAML) is shown as a code block instead of being dropped. */
 const remarkRehypeOptions = {
@@ -181,9 +188,12 @@ function makeBlock(Tag: string) {
 
     if (ctx.inlineDiff && ctx.diff && Tag !== 'tr' && Tag !== 'table') {
       const { removals } = ctx.diff;
-      const own = mods.filter((i) => removals[i]);
-      if (!own.length && cont.length) return null; // rendered as part of the block that starts the change
-      if (own.length) {
+      const parts = partMap(props['data-mod-part']);
+      const own = mods.filter((i) => removals[i] && !parts.has(i));
+      // A block with no removed lines of its own share is simply new: it renders like any added block.
+      const shared = [...parts].some(([i, [from, to]]) => removals[i] && to > from);
+      if (!own.length && !shared && cont.length) return null; // rendered as part of the block that starts the change
+      if (own.length || shared) {
         const repl = own.flatMap((i) => removals[i].replacedBy ?? []);
         const start = Math.min(sl, ...repl.map((r) => r.start));
         const reach = Math.max(0, Number(props['data-mod-el'] ?? 0), ...repl.map((r) => r.end));
@@ -194,7 +204,7 @@ function makeBlock(Tag: string) {
         );
         const cutAt = nested.length ? Number(nested[0].props['data-sl']) : Infinity;
         const keepNested = cutAt <= end && reach < cutAt;
-        const src = blockDiffSource(ctx.lines, removals, start, keepNested ? cutAt - 1 : end);
+        const src = blockDiffSource(ctx.lines, removals, start, keepNested ? cutAt - 1 : end, parts);
         const oldText = cleanForInline(Tag, src.oldText);
         const newText = cleanForInline(Tag, src.newText);
         const rest = own.filter((i) => !src.used.has(i));
