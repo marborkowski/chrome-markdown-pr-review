@@ -146,6 +146,59 @@ describe('cleanForInline', () => {
     expect(cleanForInline('h2', '## Storage ##')).toBe('Storage');
     expect(cleanForInline('p', 'one\ntwo\n\nthree')).toBe('one two\n\nthree');
     expect(cleanForInline('blockquote', '> a\n> b')).toBe('a b');
-    expect(cleanForInline('pre', '```\nx\n```')).toBe('```\nx\n```');
+  });
+  it('drops code fences (the <pre> element shows the code) but keeps front matter delimiters', () => {
+    expect(cleanForInline('pre', '```js\nx\ny\n```')).toBe('x\ny');
+    expect(cleanForInline('pre', 'x\ny')).toBe('x\ny');
+    expect(cleanForInline('pre', '---\ntitle: a\n---')).toBe('---\ntitle: a\n---');
+  });
+});
+
+import { buildThreads } from '../src/content/components/Threads';
+import { needsReviewCall, submitBlocker } from '../src/content/components/SubmitReview';
+import { blockDiffSource } from '../src/content/lib/inlineDiff';
+import type { ReviewComment } from '../src/content/types';
+
+describe('buildThreads', () => {
+  const c = (id: number, extra: Partial<ReviewComment> = {}): ReviewComment => ({
+    id, node_id: `n${id}`, path: 'a.md', body: 'x', user: { login: 'u', avatar_url: '' }, created_at: '', html_url: '',
+    line: 3, start_line: null, original_line: 3, side: 'RIGHT', commit_id: 'h', ...extra,
+  });
+
+  it('attaches resolved state and thread ids from GraphQL', () => {
+    const threads = buildThreads([c(1), c(2, { in_reply_to_id: 1 }), c(3, { line: 9 })], 'a.md', new Map([[1, { id: 'T1', resolved: true }]]));
+    expect(threads.map((t) => [t.root.id, t.resolved, t.threadId, t.replies.length])).toEqual([[1, true, 'T1', 1], [3, false, undefined, 0]]);
+  });
+});
+
+describe('review submission', () => {
+  it('skips the review call for a plain comment with only file-level drafts', () => {
+    expect(needsReviewCall('COMMENT', '', 0)).toBe(false);
+    expect(needsReviewCall('COMMENT', 'Summary', 0)).toBe(true);
+    expect(needsReviewCall('COMMENT', '', 2)).toBe(true);
+    expect(needsReviewCall('APPROVE', '', 0)).toBe(true);
+  });
+
+  it('explains what is missing', () => {
+    expect(submitBlocker('APPROVE', '', 0, 0)).toBeNull();
+    expect(submitBlocker('COMMENT', '', 0, 0)).toMatch(/summary/);
+    expect(submitBlocker('COMMENT', '', 0, 1)).toBeNull(); // file-level drafts only
+    expect(submitBlocker('REQUEST_CHANGES', '', 0, 1)).toMatch(/request changes/);
+    expect(submitBlocker('REQUEST_CHANGES', '', 1, 1)).toBeNull();
+  });
+});
+
+describe('blockDiffSource', () => {
+  const lines = ['- item one', '  continues here', '- item two'];
+  it('swaps changed lines back and keeps the unchanged ones on both sides', () => {
+    const r = blockDiffSource(lines, [{ anchor: 2, lines: ['  continued there'], replacedBy: { start: 2, end: 2 } }], 1, 2);
+    expect(r.oldText).toBe('- item one\n  continued there');
+    expect(r.newText).toBe('- item one\n  continues here');
+    expect([...r.used]).toEqual([0]);
+  });
+  it('puts lines removed inside the block back in the old version', () => {
+    const r = blockDiffSource(lines, [{ anchor: 2, lines: ['  gone'] }], 1, 2);
+    expect(r.oldText).toBe('- item one\n  gone\n  continues here');
+    expect(r.newText).toBe('- item one\n  continues here');
   });
 });

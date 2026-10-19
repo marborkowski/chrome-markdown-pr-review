@@ -1,4 +1,4 @@
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,21 @@
 +# Payments service
 +
 +Handles card and wallet payments for the checkout.
@@ -13,3 +13,10 @@
 +
 +- [x] Card payments
 +- [ ] Wallets
++
++> [!NOTE]
++> Card data never touches this service – see the [goals](docs/architecture.md#goals).
++
++---
++
++Back to [Running locally](#running-locally).

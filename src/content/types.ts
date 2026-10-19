@@ -51,6 +51,15 @@ export interface Thread {
   kind: 'line' | 'file' | 'outdated' | 'left';
   start: number | null;
   end: number | null;
+  resolved: boolean;
+  /** GraphQL id of the review thread; unknown when GraphQL isn't available. */
+  threadId?: string;
+}
+
+/** Resolution state of a review thread, keyed by its first comment's id. */
+export interface ThreadState {
+  id: string;
+  resolved: boolean;
 }
 
 export interface PendingComment {
@@ -62,6 +71,8 @@ export interface PendingComment {
   body: string;
   quote: string;
   createdAt: number;
+  /** Head commit the draft was written against (line numbers refer to it). */
+  sha?: string;
 }
 
 export const isMarkdown = (path: string) => /\.(md|markdown|mdown|mkd|mdx)$/i.test(path);

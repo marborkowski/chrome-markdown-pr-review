@@ -5,15 +5,16 @@ It works on **github.com**, **GitHub Enterprise Server** and **GHE.com**.
 
 ## Features
 
-- **Rendered review view** for every `.md` / `.markdown` / `.mdx` file in a PR, with GitHub's own Markdown styling, light and dark.
-- **Changes highlighted in the rendered document.** Added blocks are green, modified blocks amber, and deleted passages appear as red "Removed" blocks. **Word diff** mode shows exactly which words changed inside a paragraph, list item or heading.
+- **Rendered review view** for every `.md` / `.markdown` / `.mdx` file in a PR, with GitHub's own Markdown styling, light and dark. GitHub alerts (`> [!NOTE]`, `[!WARNING]`, …) render like on GitHub.
+- **Links work inside the review.** `#anchor` links scroll to the heading, and links to another Markdown file of the same PR open that file in the review (Ctrl/⌘-click opens GitHub instead).
+- **Changes highlighted in the rendered document.** Added blocks are green, modified blocks amber, and deleted passages appear as red "Removed" blocks. **Word diff** mode shows exactly which words changed inside a paragraph, list item, heading or code block, keeping the rest of the block and its formatting (code, emphasis, links).
 - **Comment on any selected text.** Select a phrase and press **Comment** (or `c`). The extension maps the selection to the exact source line(s), even inside long, soft-wrapped paragraphs, and quotes the selected text in the comment.
 - **Suggested changes.** **Suggest** pre-fills a GitHub ```` ```suggestion ```` block with the source lines, so the author can apply it with one click.
-- **Draft reviews.** Collect comments locally across files, then **Finish review** with Comment / Approve / Request changes. You can also post a single comment right away with **Comment now**.
-- **Existing conversations** appear as badges next to the block they refer to and in a side panel. You can reply there, and outdated comments are listed separately.
+- **Draft reviews.** Collect comments locally across files, edit or delete them, then **Finish review** with Comment / Approve / Request changes. You can also post a single comment right away with **Comment now**. Drafts written before the PR got new commits are flagged so you can check their lines.
+- **Existing conversations** appear as badges next to the block they refer to and in a side panel. You can reply and **resolve / unresolve** them there; resolved and outdated conversations are tucked away in their own sections.
 - **Viewed state** stays in sync with GitHub's "Viewed" checkbox.
 - **Source mode**: the raw Markdown with line numbers and the diff, also commentable.
-- Keyboard shortcuts: `n`/`p` for the next/previous change, `[`/`]` to switch files, `v` to mark a file viewed, `c` to comment on the selection, `Esc` to close. `Alt+Shift+M` opens the panel from anywhere on a PR.
+- Keyboard shortcuts: `n`/`p` for the next/previous change, `[`/`]` to switch files, `v` to mark a file viewed, `c` / `s` to comment on / suggest a change to the selection, `Ctrl/⌘+Enter` to save, `Esc` to close. `Alt+Shift+M` opens the panel from anywhere on a PR. `Esc` in a half-written comment asks for a second `Esc` before discarding it.
 
 GitHub only accepts line comments on lines inside a diff hunk. If your selection falls outside the changed part of a file, the extension tells you and posts a **file-level comment** instead, with the quote and line numbers included. On old GHE servers that don't support file comments, it falls back to a PR conversation comment.
 
@@ -67,6 +68,8 @@ src/
     lib/annotate.ts        rehype plugin: tags elements with source line ranges and
                            marks the smallest block owning each changed/commented line
     lib/anchor.ts          selection → source lines; lines → valid GitHub comment anchor
+    lib/inlineDiff.ts      word diff of a block's Markdown source, rendered as Markdown
+    lib/gfm.ts             GitHub alerts, heading ids (GitHub slugs), anchor lookup
   options/                 settings page (React)
   shared/                  host config + message types
 ```
@@ -84,6 +87,7 @@ npm run typecheck
 npm run harness && python3 -m http.server 8765
 #   → http://localhost:8765/dev/harness.html   (#dark for dark mode)
 node dev/e2e.mjs            # automated UI test against the harness (Playwright)
+#   on macOS: CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node dev/e2e.mjs
 
 # Real extension against a fake GitHub Enterprise server:
 node dev/mock-ghe.mjs &  node dev/ext-e2e.mjs

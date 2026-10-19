@@ -92,14 +92,18 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
             appendIdx(o.node, 'dataMods', i);
             addClass(o.node, 'mdr-mod');
             const seen = new Set([o]);
+            let reach = o.el;
             for (let l = first + 1; l <= r.replacedBy.end; l++) {
               if (isBlank(l)) continue;
               const c = ownerOf(l);
               if (c && !seen.has(c) && !CONTAINERS.has(c.node.tagName)) {
                 seen.add(c);
                 appendIdx(c.node, 'dataModCont', i);
+                reach = Math.max(reach, c.el);
               }
             }
+            // Blocks continuing the change are rendered inside the owner's inline diff, whole.
+            if (reach > o.el) o.node.properties.dataModEl = Math.max(Number(o.node.properties.dataModEl ?? 0), reach);
             return;
           }
         }

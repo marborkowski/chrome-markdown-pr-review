@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, drafts as draftStore, gh } from '../api';
 import { narrowLines, resolveAnchor } from '../lib/anchor';
 import { contentFromRemovedPatch, parsePatch, type DiffInfo } from '../lib/patch';
-import { prKey, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread } from '../types';
+import { prKey, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread, type ThreadState } from '../types';
 import { Composer, type ComposerTarget } from './Composer';
 import { ErrorBoundary } from './ErrorBoundary';
-import { makeUrlResolver, MarkdownDoc } from './MarkdownDoc';
+import { findAnchor } from '../lib/gfm';
+import { makeUrlResolver, MarkdownDoc, reveal } from './MarkdownDoc';
 import { SourceDoc } from './SourceDoc';
-import { SubmitReview, type ReviewEvent } from './SubmitReview';
+import { needsReviewCall, SubmitReview, type ReviewEvent } from './SubmitReview';
 import { buildThreads, ThreadsPanel } from './Threads';
 import { WordDiff } from './WordDiff';
 
@@ -53,6 +54,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
   });
   const [contents, setContents] = useState<Record<string, { text?: string; error?: string }>>({});
   const [comments, setComments] = useState<ReviewComment[]>([]);
+  const [threadStates, setThreadStates] = useState<Map<number, ThreadState>>(() => new Map());
   const [viewed, setViewed] = useState<Record<string, boolean> | null>(null);
   const [drafts, setDrafts] = useState<PendingComment[]>([]);
   const [mode, setMode] = useState<'rendered' | 'source'>(() => (pref.get('mode', 'rendered') as any));
@@ -81,7 +83,10 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
   // ---- data loading -------------------------------------------------------
   const loadComments = useCallback(async () => {
     try {
-      setComments(await gh.comments(ctx));
+      // Resolved state comes from GraphQL; without it (no token, old server) threads just can't be resolved here.
+      const [list, states] = await Promise.all([gh.comments(ctx), gh.reviewThreads(ctx).catch(() => null)]);
+      setComments(list);
+      if (states) setThreadStates(states);
     } catch (e) {
       notify('err', `Couldn't load comments: ${errText(e)}`);
     }
@@ -96,11 +101,12 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
   useEffect(() => {
     if (!file || contents[file.filename]) return;
     sessionStorage.setItem(`mdr:last:${key}`, file.filename);
-    if (file.status === 'removed') {
+    if (file.status === 'removed' && file.patch) {
       setContents((c) => ({ ...c, [file.filename]: { text: contentFromRemovedPatch(file.patch) } }));
       return;
     }
-    gh.raw(ctx, file.filename, pr.head.sha)
+    // A deleted file without a patch (too large to diff) is read from the base commit.
+    gh.raw(ctx, file.filename, file.status === 'removed' ? pr.base.sha : pr.head.sha)
       .then((text) => setContents((c) => ({ ...c, [file.filename]: { text } })))
       .catch((e) => setContents((c) => ({ ...c, [file.filename]: { error: errText(e) } })));
   }, [file?.filename, pr.head.sha]);
@@ -130,8 +136,9 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     () => (rawDiff && file?.status === 'added' ? { ...rawDiff, added: new Set(), removals: [] } : rawDiff),
     [rawDiff, file?.status],
   );
-  const threads = useMemo(() => buildThreads(comments, path), [comments, path]);
-  const threadLines = useMemo(() => threads.filter((t) => t.kind === 'line').map((t) => t.end!), [threads]);
+  const threads = useMemo(() => buildThreads(comments, path, threadStates), [comments, path, threadStates]);
+  /** Resolved conversations don't get a badge in the document. */
+  const threadLines = useMemo(() => threads.filter((t) => t.kind === 'line' && !t.resolved).map((t) => t.end!), [threads]);
   const fileDrafts = useMemo(() => drafts.filter((d) => d.path === path), [drafts, path]);
   const pendingLines = useMemo(() => fileDrafts.map((d) => d.end), [fileDrafts]);
   const activeRange = useMemo<[number, number] | null>(
@@ -144,9 +151,9 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
   );
   const threadCount = useMemo(() => {
     const m: Record<string, number> = {};
-    for (const c of comments) if (!c.in_reply_to_id) m[c.path] = (m[c.path] ?? 0) + 1;
+    for (const c of comments) if (!c.in_reply_to_id && !threadStates.get(c.id)?.resolved) m[c.path] = (m[c.path] ?? 0) + 1;
     return m;
-  }, [comments]);
+  }, [comments, threadStates]);
 
   // ---- selection → comment ------------------------------------------------
   const getSelection = () => {
@@ -197,7 +204,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     if (how === 'review') {
       saveDrafts([
         ...drafts,
-        { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, path: file.filename, kind: anchor.kind, start: anchor.start, end: anchor.end, body, quote: composer.quote, createdAt: Date.now() },
+        { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, path: file.filename, kind: anchor.kind, start: anchor.start, end: anchor.end, body, quote: composer.quote, createdAt: Date.now(), sha: pr.head.sha },
       ]);
       setComposer(null);
       getSelection()?.removeAllRanges();
@@ -226,13 +233,16 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     let remaining = drafts;
     try {
       const lineDrafts = drafts.filter((d) => d.kind === 'line');
-      await gh.createReview(
-        ctx,
-        pr.head.sha,
-        event,
-        body,
-        lineDrafts.map((d) => ({ path: d.path, body: d.body, line: d.end, start_line: d.start })),
-      );
+      // File-level drafts are posted separately; a plain comment review with nothing else in it would be rejected.
+      if (needsReviewCall(event, body, lineDrafts.length)) {
+        await gh.createReview(
+          ctx,
+          pr.head.sha,
+          event,
+          body,
+          lineDrafts.map((d) => ({ path: d.path, body: d.body, line: d.end, start_line: d.start })),
+        );
+      }
       remaining = remaining.filter((d) => d.kind !== 'line');
       saveDrafts(remaining);
       for (const d of drafts.filter((x) => x.kind === 'file')) {
@@ -260,6 +270,16 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     } catch (e) {
       notify('err', `Couldn't reply: ${errText(e)}`);
       throw e;
+    }
+  };
+
+  const resolveThread = async (t: Thread, resolved: boolean) => {
+    if (!t.threadId) return;
+    try {
+      await gh.setThreadResolved(ctx, t.threadId, resolved);
+      setThreadStates((m) => new Map(m).set(t.root.id, { id: t.threadId!, resolved }));
+    } catch (e) {
+      notify('err', `Couldn't ${resolved ? 'resolve' : 'unresolve'} the conversation: ${errText(e)}`);
     }
   };
 
@@ -298,12 +318,6 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     return () => cancelAnimationFrame(id);
   });
 
-  const flash = (el: Element) => {
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    el.classList.add('mdr-flash');
-    window.setTimeout(() => el.classList.remove('mdr-flash'), 1300);
-  };
-
   const gotoChange = (dir: 1 | -1) => {
     const els = changeEls();
     const box = scrollRef.current?.getBoundingClientRect();
@@ -312,7 +326,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     const target = dir === 1
       ? els.find((e) => e.getBoundingClientRect().top > mid + 4) ?? els[0]
       : [...els].reverse().find((e) => e.getBoundingClientRect().top < mid - 4) ?? els[els.length - 1];
-    flash(target);
+    reveal(target);
   };
 
   const jumpToLine = useCallback((line: number) => {
@@ -327,7 +341,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
         span = e - s;
       }
     }
-    if (best) flash(best);
+    if (best) reveal(best);
     setFocus([line, line]);
   }, []);
 
@@ -338,6 +352,39 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
   const onMods = useCallback((mods: number[], anchor: HTMLElement) => {
     setPopover({ mods, rect: anchor.getBoundingClientRect() });
   }, []);
+
+  /** Links to another Markdown file of this PR open it in the review (and jump to its #anchor). */
+  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+  const onLink = useCallback(
+    (href: string) => {
+      const base = `${ctx.origin}/${ctx.owner}/${ctx.repo}/blob/`;
+      if (!href.startsWith(base)) return false;
+      const rest = href.slice(base.length);
+      const [target, hash = ''] = rest.slice(rest.indexOf('/') + 1).split('#');
+      let name: string;
+      try {
+        name = target.split('?')[0].split('/').map(decodeURIComponent).join('/');
+      } catch {
+        return false;
+      }
+      const f = files.find((x) => x.filename === name);
+      if (!f) return false;
+      setPath(f.filename);
+      setPendingAnchor(hash || null);
+      return true;
+    },
+    [ctx, files],
+  );
+
+  useEffect(() => {
+    if (!pendingAnchor || text === undefined) return;
+    const id = requestAnimationFrame(() => {
+      const el = findAnchor(docRef.current, pendingAnchor);
+      if (el) reveal(el);
+      setPendingAnchor(null);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [pendingAnchor, text, mode]);
 
   const switchFile = (delta: number) => {
     const i = files.findIndex((f) => f.filename === path);
@@ -354,6 +401,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       if (popover) setPopover(null);
       else if (composer) setComposer(null);
       else if (toolbar) setToolbar(null);
+      else if (typing) t.blur(); // leave a reply box first; closing would throw away what was typed
       else if (!submitOpen) onClose();
       e.stopPropagation();
       return;
@@ -365,6 +413,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     else if (e.key === '[') switchFile(-1);
     else if (e.key === 'v') toggleViewed();
     else if (e.key === 'c' && toolbar) { e.preventDefault(); openComposer(false); }
+    else if (e.key === 's' && toolbar && file?.status !== 'removed') { e.preventDefault(); openComposer(true); }
     else return;
     e.stopPropagation();
   };
@@ -467,7 +516,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
             );
           })}
           <div className="mdr-files-foot mdr-muted">
-            <kbd>n</kbd>/<kbd>p</kbd> next/prev change · <kbd>[</kbd>/<kbd>]</kbd> file · <kbd>v</kbd> viewed · select text + <kbd>c</kbd> comment
+            <kbd>n</kbd>/<kbd>p</kbd> next/prev change · <kbd>[</kbd>/<kbd>]</kbd> file · <kbd>v</kbd> viewed · select text + <kbd>c</kbd> comment / <kbd>s</kbd> suggest
           </div>
         </nav>
 
@@ -494,9 +543,10 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
 
           <div className="mdr-doc-wrap">
             {!file && <p className="mdr-muted">No Markdown files in this pull request.</p>}
-            {file && !text && !contents[file.filename]?.error && <div className="mdr-skeleton"><div /><div /><div /><div /></div>}
+            {file && text === undefined && !contents[file.filename]?.error && <div className="mdr-skeleton"><div /><div /><div /><div /></div>}
             {file && contents[file.filename]?.error && <div className="mdr-banner mdr-banner-del">Couldn't load the file: {contents[file.filename]!.error}</div>}
-            {file && text !== undefined && (
+            {file && text !== undefined && !text.trim() && <p className="mdr-muted mdr-empty-doc">This file is empty.</p>}
+            {file && text !== undefined && !!text.trim() && (
               <article ref={docRef} className={`markdown-body mdr-doc mdr-mode-${mode}`} onMouseUp={onMouseUp}>
                 {mode === 'rendered' ? (
                   <ErrorBoundary
@@ -518,6 +568,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
                       resolveUrl={resolveUrl}
                       onBadge={onBadge}
                       onMods={onMods}
+                      onLink={onLink}
                     />
                   </ErrorBoundary>
                 ) : (
@@ -534,9 +585,12 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
               threads={threads}
               drafts={fileDrafts}
               focus={focus}
+              headSha={pr.head.sha}
               onJump={jumpToLine}
               onReply={reply}
+              onResolve={resolveThread}
               onDeleteDraft={(id) => saveDrafts(drafts.filter((d) => d.id !== id))}
+              onEditDraft={(id, body) => saveDrafts(drafts.map((d) => (d.id === id ? { ...d, body } : d)))}
             />
           </aside>
         )}
@@ -545,7 +599,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       {toolbar && !composer && (
         <div className="mdr-toolbar" style={{ top: Math.max(8, toolbar.rect.top - 44), left: toolbar.rect.left + toolbar.rect.width / 2 }} onMouseDown={(e) => e.preventDefault()}>
           <button onClick={() => openComposer(false)} title="Comment (c)">💬 Comment</button>
-          <button onClick={() => openComposer(true)} disabled={file?.status === 'removed'} title="Suggest a change">± Suggest</button>
+          <button onClick={() => openComposer(true)} disabled={file?.status === 'removed'} title="Suggest a change (s)">± Suggest</button>
         </div>
       )}
 
@@ -588,7 +642,16 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
         </>
       )}
 
-      {submitOpen && <SubmitReview draftCount={drafts.length} busy={busy} onCancel={() => setSubmitOpen(false)} onSubmit={submitReview} />}
+      {submitOpen && (
+        <SubmitReview
+          draftCount={drafts.length}
+          lineDraftCount={drafts.filter((d) => d.kind === 'line').length}
+          staleCount={drafts.filter((d) => d.sha && d.sha !== pr.head.sha).length}
+          busy={busy}
+          onCancel={() => setSubmitOpen(false)}
+          onSubmit={submitReview}
+        />
+      )}
 
       {toast && (
         <div className={`mdr-toast mdr-toast-${toast.kind}`} onClick={() => setToast(null)}>

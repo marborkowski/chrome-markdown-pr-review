@@ -7,9 +7,9 @@ export function WordDiff({ oldText, newText }: { oldText: string; newText: strin
     <span className="mdr-worddiff">
       {parts.map((p, i) =>
         p.added ? (
-          <ins key={i}>{p.value}</ins>
+          <ins key={i} className="mdr-d-ins">{p.value}</ins>
         ) : p.removed ? (
-          <del key={i}>{p.value}</del>
+          <del key={i} className="mdr-d-del">{p.value}</del>
         ) : (
           <span key={i}>{p.value}</span>
         ),
