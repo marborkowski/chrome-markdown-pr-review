@@ -192,7 +192,8 @@ npm run harness && python3 -m http.server 8765
 
 # Automated UI test against the harness (Playwright). On macOS point it at Chrome:
 CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node dev/e2e.mjs
-# node dev/e2e.mjs [screenshotDir]   # screenshots go to dev/out by default; the harness must be on port 8765
+# node dev/e2e.mjs [screenshotDir]   # screenshots go to dev/out by default
+# HARNESS_URL=http://localhost:8767 node dev/e2e.mjs   # harness served on another port (default 8765)
 ```
 
 The real extension can be tested end to end against a fake GitHub Enterprise server (host configuration, dynamic content script, API through the service worker):
