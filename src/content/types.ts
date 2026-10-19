@@ -15,6 +15,30 @@ export interface PullRequest {
   head: { sha: string; ref: string };
   base: { sha: string; ref: string };
   user: { login: string };
+  /** Number of review comments (used to notice new ones without reloading them all). */
+  review_comments?: number;
+  updated_at?: string;
+}
+
+export interface Commit {
+  sha: string;
+  commit: { message: string; author: { name: string; date: string } | null };
+  author: { login: string } | null;
+}
+
+export interface Review {
+  id: number;
+  user: { login: string } | null;
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
+  commit_id: string;
+  submitted_at?: string;
+  html_url?: string;
+}
+
+export interface Compare {
+  status: 'diverged' | 'ahead' | 'behind' | 'identical';
+  merge_base_commit: { sha: string };
+  files?: PrFile[];
 }
 
 export interface PrFile {
@@ -39,6 +63,7 @@ export interface ReviewComment {
   line: number | null;
   start_line: number | null;
   original_line: number | null;
+  original_start_line?: number | null;
   side: 'LEFT' | 'RIGHT';
   subject_type?: 'line' | 'file';
   in_reply_to_id?: number;
@@ -68,6 +93,8 @@ export interface PendingComment {
   kind: 'line' | 'file';
   start: number;
   end: number;
+  /** LEFT: a comment on removed text, `start`/`end` are base-file lines. */
+  side?: 'LEFT' | 'RIGHT';
   body: string;
   quote: string;
   createdAt: number;

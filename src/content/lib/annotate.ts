@@ -1,7 +1,8 @@
 import type { Element, ElementContent, Root, Parent } from 'hast';
 import { visit } from 'unist-util-visit';
-import { splitRemoved } from './inlineDiff';
+import { similarity, splitRemoved, wordCounts } from './inlineDiff';
 import type { DiffInfo, Removal } from './patch';
+import { isDelimiterRow, isTableLine, pairRows, sameRow } from './tables';
 
 /** Elements that represent a block of source lines and can own changes, threads and comments. */
 export const BLOCK_TAGS = [
@@ -14,12 +15,25 @@ const CONTAINERS = new Set(['ul', 'ol', 'table', 'blockquote', 'dl', 'details', 
 const SPLIT_TAGS = new Set(['li', 'p']);
 const hasBlocks = (n: Element): boolean => n.children.some((c) => c.type === 'element' && (BLOCK.has(c.tagName) || hasBlocks(c)));
 
+/**
+ * Old and new text with too little in common for a word diff to help: a paragraph rewritten from
+ * scratch reads better as the old text removed and the new text added.
+ */
+function unrelated(oldLines: string[], newLines: string[]) {
+  const a = wordCounts(oldLines);
+  const b = wordCounts(newLines);
+  const size = (m: Map<string, number>) => [...m.values()].reduce((x, y) => x + y, 0);
+  return size(a) >= 8 && size(b) >= 8 && similarity(a, b) < 0.25;
+}
+
 export interface AnnotateOptions {
   diff: DiffInfo | null;
   lines: string[];
   threadLines: number[];
   pendingLines: number[];
   activeRange: [number, number] | null;
+  /** Whitespace-only changes are hidden: a table row that only got re-padded counts as unchanged. */
+  ignoreWhitespace?: boolean;
 }
 
 interface BlockRec {
@@ -45,6 +59,21 @@ function appendIdx(node: Element, key: string, i: number | string) {
 function bump(node: Element, key: string) {
   node.properties[key] = Number(node.properties[key] ?? 0) + 1;
 }
+
+function removeClass(node: Element, cls: string) {
+  const cur = node.properties.className;
+  if (Array.isArray(cur)) node.properties.className = cur.filter((c) => c !== cls);
+}
+
+const hasClass = (node: Element, cls: string) => Array.isArray(node.properties.className) && node.properties.className.includes(cls);
+
+/** A table row that is gone, shown inside its table (rendered from the removal's line by the tr component). */
+const removedRow = (i: number, k: number, oldLine: number): Element => ({
+  type: 'element',
+  tagName: 'tr',
+  properties: { className: ['mdr-removed-row'], dataRemovedRow: `${i}:${k}`, dataOsl: oldLine, dataOel: oldLine },
+  children: [],
+});
 
 /**
  * rehype plugin: tags every element with its source line range (data-sl / data-el)
@@ -94,15 +123,106 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
       for (const l of diff.added) {
         if (isBlank(l)) continue;
         const o = ownerOf(l);
-        if (o) addClass(o.node, 'mdr-added');
+        if (!o) continue;
+        // A table's delimiter row has no element of its own: a new one doesn't make the whole table new.
+        if (o.node.tagName === 'table' && isDelimiterRow(opts.lines[l - 1] ?? '')) continue;
+        const from = diff.moved.get(l);
+        if (from === undefined) addClass(o.node, 'mdr-added');
+        else {
+          addClass(o.node, 'mdr-moved');
+          o.node.properties.dataMovedFrom = from;
+        }
+      }
+      // A moved block that also contains new lines is a change like any other.
+      for (const b of blocks) if (hasClass(b.node, 'mdr-added') && hasClass(b.node, 'mdr-moved')) removeClass(b.node, 'mdr-moved');
+      for (const r of diff.reflowed) {
+        for (let l = r.start; l <= r.end; l++) {
+          const o = isBlank(l) ? null : ownerOf(l);
+          if (o && !hasClass(o.node, 'mdr-added') && !hasClass(o.node, 'mdr-mod')) addClass(o.node, 'mdr-reflow');
+        }
       }
 
-      const inserts: { parent: Parent; before: Element | null; idx: number }[] = [];
+      /** Rows to insert into tables (removed rows), and removed blocks to insert before the block that follows them. */
+      const rowInserts: { parent: Parent; node: Element; ref: Element; after: boolean }[] = [];
+      const tableRows = (r: Removal) => {
+        const rows = r.lines.map((l, k) => [l, k] as const).filter(([l]) => l.trim());
+        return rows.length > 0 && rows.every(([l]) => isTableLine(l)) ? rows.filter(([l]) => !isDelimiterRow(l)) : null;
+      };
+
+      /** A replacement made only of table rows: pair old and new rows, so edited rows get a cell diff and removed rows stay in the table. */
+      const replaceRows = (r: Removal, i: number): boolean => {
+        const old = tableRows(r);
+        if (!old) return false;
+        const rows: BlockRec[] = [];
+        for (let l = r.replacedBy!.start; l <= r.replacedBy!.end; l++) {
+          if (isBlank(l)) continue;
+          const o = ownerOf(l);
+          if (!o) return false;
+          if (o.node.tagName === 'table' && isDelimiterRow(opts.lines[l - 1] ?? '')) continue;
+          if (o.node.tagName !== 'tr') return false;
+          if (!rows.includes(o)) rows.push(o);
+        }
+        if (!rows.length) return false;
+        const pairs = pairRows(old.map(([l]) => l), rows.map((b) => opts.lines[b.sl - 1] ?? ''));
+        appendIdx(rows[0].node, 'dataMods', i);
+        rows.forEach((b, j) => {
+          if (pairs[j] < 0) return;
+          const [text, k] = old[pairs[j]];
+          removeClass(b.node, 'mdr-added');
+          if (sameRow(text, opts.lines[b.sl - 1] ?? '')) {
+            if (opts.ignoreWhitespace) addClass(b.node, 'mdr-reflow');
+            else addClass(b.node, 'mdr-mod');
+            return;
+          }
+          addClass(b.node, 'mdr-mod');
+          b.node.properties.dataRowOld = `${i}:${k}`;
+        });
+        const paired = new Set(pairs.filter((p) => p >= 0));
+        old.forEach(([, k], p) => {
+          if (paired.has(p)) return;
+          const j = pairs.findIndex((q) => q > p);
+          const ref = j >= 0 ? rows[j] : rows[rows.length - 1];
+          rowInserts.push({ parent: ref.parent, node: removedRow(i, k, r.oldStart + k), ref: ref.node, after: j < 0 });
+        });
+        return true;
+      };
+
+      const inserts: { parent: Parent; before: Element | null; idx: number; more: number[] }[] = [];
+      /** Every removed line was moved elsewhere. */
+      const allMoved = (r: Removal) => {
+        const moved = new Set<number>();
+        for (const m of r.moved ?? []) for (let k = m.from; k < m.to; k++) moved.add(k);
+        return moved.size > 0 && r.lines.every((l, k) => !l.trim() || moved.has(k));
+      };
+      /** Only blank or new lines between two removals: in the old file they were neighbours. */
+      const besides = (a: Removal, b: Removal) => {
+        for (let l = a.anchor; l < b.anchor; l++) if (!diff.added.has(l) && !isBlank(l)) return false;
+        return true;
+      };
       diff.removals.forEach((r, i) => {
+        if (r.replacedBy && replaceRows(r, i)) return;
+        if (!r.replacedBy) {
+          // Rows deleted from a table stay in it, struck out.
+          const rows = tableRows(r);
+          if (rows) {
+            const next = ownerOf(r.anchor);
+            const prev = ownerOf(r.anchor - 1);
+            const ref = next?.node.tagName === 'tr' ? next : prev?.node.tagName === 'tr' ? prev : null;
+            if (ref) {
+              rows.forEach(([, k]) => rowInserts.push({ parent: ref.parent, node: removedRow(i, k, r.oldStart + k), ref: ref.node, after: ref !== next }));
+              return;
+            }
+          }
+        }
         if (r.replacedBy) {
           let first = -1;
           for (let l = r.replacedBy.start; l <= r.replacedBy.end; l++) if (!isBlank(l)) { first = l; break; }
           const o = first > 0 ? ownerOf(first) : null;
+          // Replaced by a container (raw HTML <details>, a callout, …) or by unrelated text: removed + added, not a word diff.
+          if (o && (CONTAINERS.has(o.node.tagName) || unrelated(r.lines, opts.lines.slice(r.replacedBy.start - 1, r.replacedBy.end)))) {
+            inserts.push({ parent: o.parent, before: o.node, idx: i, more: [] });
+            return;
+          }
           if (o) {
             const group = [o];
             let cut = false;
@@ -144,16 +264,36 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
           addClass(inside.node, 'mdr-mod');
           return;
         }
+        // A section moved away in several pieces (git split it around new text) gets one marker.
+        const last = inserts[inserts.length - 1];
+        const prev = last && diff.removals[last.more.length ? last.more[last.more.length - 1] : last.idx];
+        if (last && !r.replacedBy && allMoved(r) && prev && !prev.replacedBy && allMoved(prev) && last.idx + last.more.length === i - 1 && besides(prev, r)) {
+          last.more.push(i);
+          return;
+        }
         // Otherwise show a standalone "removed" block before the next block.
         const target = blocks.find((b) => b.sl >= r.anchor);
-        inserts.push(target ? { parent: target.parent, before: target.node, idx: i } : { parent: tree, before: null, idx: i });
+        inserts.push(target ? { parent: target.parent, before: target.node, idx: i, more: [] } : { parent: tree, before: null, idx: i, more: [] });
       });
+
+      // Insert after the reference row in order: keep a running cursor per reference.
+      const after = new Map<Element, Element>();
+      for (const ins of rowInserts) {
+        const kids = ins.parent.children as ElementContent[];
+        if (ins.after) {
+          const prev = after.get(ins.ref) ?? ins.ref;
+          kids.splice(kids.indexOf(prev) + 1, 0, ins.node);
+          after.set(ins.ref, ins.node);
+        } else {
+          kids.splice(kids.indexOf(ins.ref), 0, ins.node);
+        }
+      }
 
       for (const ins of inserts) {
         const node: Element = {
           type: 'element',
           tagName: 'div',
-          properties: { className: ['mdr-removed'], dataRemoval: ins.idx },
+          properties: { className: ['mdr-removed'], dataRemoval: ins.idx, ...(ins.more.length ? { dataRemovalMore: ins.more.join(' ') } : {}) },
           children: [],
         };
         const kids = ins.parent.children as ElementContent[];

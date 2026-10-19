@@ -13,12 +13,17 @@
   "dependencies": {
     "diff": "^8.0.4",
     "github-markdown-css": "^5.8.1",
+    "katex": "^0.18.10",
     "mermaid": "^12.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
     "remark-frontmatter": "^5.0.0",
+    "remark-gemoji": "^8.0.0",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
@@ -36,5 +41,8 @@
   },
   "private": true,
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "overrides": {
+    "katex": "$katex"
+  }
 }

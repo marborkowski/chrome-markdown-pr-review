@@ -1,5 +1,6 @@
 import type { Element, ElementContent, Root as HastRoot } from 'hast';
 import type { Blockquote, Root as MdastRoot } from 'mdast';
+import { defaultSchema, type Options as Schema } from 'rehype-sanitize';
 import { visit } from 'unist-util-visit';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +33,10 @@ const ALERTS: Record<string, { title: string; icon: string }> = {
 /** The marker has to be alone on the first line of the quote, like on GitHub. */
 const ALERT_RE = /^\[!(note|tip|important|warning|caution)\][ \t]*(?:\r?\n|$)/i;
 
-/** remark plugin: render GitHub alert blockquotes the way GitHub does (github-markdown-css styles them). */
+/**
+ * remark plugin: a GitHub alert blockquote loses its [!KIND] marker and is tagged as a callout;
+ * rehypeCallouts gives it GitHub's markup after sanitizing (github-markdown-css styles it).
+ */
 export function remarkAlerts() {
   return (tree: MdastRoot) => {
     visit(tree, 'blockquote', (node: Blockquote) => {
@@ -41,23 +45,74 @@ export function remarkAlerts() {
       if (!p || p.type !== 'paragraph' || t?.type !== 'text') return;
       const m = ALERT_RE.exec(t.value);
       if (!m) return;
-      const kind = m[1].toLowerCase();
-      const { title, icon } = ALERTS[kind];
       t.value = t.value.slice(m[0].length);
       if (!t.value) p.children.shift();
       if (!p.children.length) node.children.shift();
-      node.data = { ...node.data, hProperties: { className: ['markdown-alert', `markdown-alert-${kind}`] } };
+      node.data = { ...node.data, hProperties: { ...(node.data?.hProperties as object), dataCallout: m[1].toLowerCase() } };
+    });
+  };
+}
+
+/** rehype plugin: render callouts (GitHub alerts, docs-site admonitions) with GitHub's alert markup. */
+export function rehypeCallouts() {
+  return (tree: HastRoot) => {
+    visit(tree, 'element', (node: Element) => {
+      const kind = node.properties.dataCallout;
+      if (typeof kind !== 'string' || !ALERTS[kind]) return;
+      const custom = node.properties.dataCalloutTitle;
+      delete node.properties.dataCallout;
+      delete node.properties.dataCalloutTitle;
+      const { title, icon } = ALERTS[kind];
+      node.properties.className = ['markdown-alert', `markdown-alert-${kind}`];
       const svg: Element = {
         type: 'element',
         tagName: 'svg',
         properties: { className: ['octicon'], viewBox: '0 0 16 16', width: 16, height: 16, ariaHidden: 'true' },
         children: [{ type: 'element', tagName: 'path', properties: { d: icon }, children: [] }],
       };
-      node.children.unshift({
-        type: 'paragraph',
-        children: [],
-        data: { hProperties: { className: ['markdown-alert-title'] }, hChildren: [svg, { type: 'text', value: title }] },
-      });
+      const label = typeof custom === 'string' && custom.trim() ? custom.trim() : title;
+      node.children.unshift({ type: 'element', tagName: 'p', properties: { className: ['markdown-alert-title'] }, children: [svg, { type: 'text', value: label }] });
+    });
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Raw HTML: rendered like GitHub renders it, through GitHub's sanitizing rules.
+// ---------------------------------------------------------------------------
+
+const allow = (tag: string, ...extra: NonNullable<Schema['attributes']>[string]) => [...(defaultSchema.attributes?.[tag] ?? []), ...extra];
+
+/**
+ * GitHub's allow-list (hast-util-sanitize's default schema), plus the data attributes our own
+ * Markdown extensions hand to the plugins that run after sanitizing. Classes stay restricted, so
+ * HTML in a document can never pose as a change marker or as part of the review UI.
+ */
+export const sanitizeSchema: Schema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    blockquote: allow('blockquote', 'dataCallout'),
+    div: allow('div', 'dataCallout', 'dataCalloutTitle'),
+    pre: allow('pre', 'dataFrontmatter'),
+  },
+};
+
+/** rehype plugin: resolve relative `srcset` candidates (<picture><source srcset>), which react-markdown leaves alone. */
+export function rehypeSrcset(resolve: (url: string, key: string) => string) {
+  return (tree: HastRoot) => {
+    visit(tree, 'element', (node: Element) => {
+      const v = node.properties.srcSet;
+      if (v == null) return;
+      const list = Array.isArray(v) ? v.map(String).join(', ') : String(v);
+      node.properties.srcSet = list
+        .split(/,\s+/)
+        .map((c) => {
+          const [url, ...desc] = c.trim().split(/\s+/);
+          const r = url ? resolve(url, 'src') : '';
+          return r ? [r, ...desc].join(' ') : '';
+        })
+        .filter(Boolean)
+        .join(', ');
     });
   };
 }
@@ -102,7 +157,7 @@ export function findAnchor(root: ParentNode | null | undefined, fragment: string
   try { id = decodeURIComponent(fragment); } catch { /* keep as is */ }
   const bare = id.replace(/^user-content-/, '');
   for (const cand of [id, bare, `user-content-${bare}`]) {
-    const el = root.querySelector<HTMLElement>(`#${CSS.escape(cand)}`);
+    const el = root.querySelector<HTMLElement>(`#${CSS.escape(cand)}`) ?? root.querySelector<HTMLElement>(`a[name="${CSS.escape(cand)}"]`);
     if (el) return el;
   }
   return null;

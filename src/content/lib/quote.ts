@@ -4,7 +4,9 @@
  * (where GFM markup wouldn't render), as Unicode combining strokes.
  */
 
-const BLOCK = new Set(['P', 'DIV', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'TR', 'TABLE', 'HR', 'DT', 'DD', 'SECTION', 'ARTICLE']);
+const BLOCK = new Set(['P', 'DIV', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'TR', 'TABLE', 'HR', 'DT', 'DD', 'SECTION', 'ARTICLE', 'DETAILS', 'SUMMARY']);
+/** Table cells are separated like in a Markdown row. */
+const CELL = new Set(['TD', 'TH']);
 const STROKE = '̶';
 
 /** Strike every character of `s` with U+0336 (what "strikethrough text" generators do). */
@@ -28,8 +30,16 @@ function serialize(node: Node, inCode: boolean, out: string[]) {
   const el = node as Element;
   if (el.nodeType === Node.ELEMENT_NODE) {
     // SVG elements keep a lowercase tagName, so match on localName: mermaid's <style> / markers aren't text.
-    if (['style', 'script', 'title', 'desc', 'defs'].includes(el.localName)) return;
-    if (el.matches('.mdr-gutter, .mdr-mermaid-bar, .mdr-mermaid-caption, .mdr-mermaid-loading, .mdr-banner')) return; // UI chrome
+    if (['style', 'script', 'title', 'desc', 'defs', 'annotation'].includes(el.localName)) return;
+    // UI chrome, and the old version of a changed formula
+    if (el.matches('.mdr-gutter, .mdr-mermaid-bar, .mdr-mermaid-caption, .mdr-mermaid-loading, .mdr-banner, .mdr-img-bar, .mdr-fold-toggle, .mdr-removed-head, .mdr-math-old')) return;
+    // A formula is quoted as its TeX, not as the characters MathML spreads over many elements.
+    const tex = el.getAttribute('data-tex');
+    if (tex !== null && el.classList.contains('mdr-math')) {
+      out.push(el.classList.contains('mdr-math-display') ? `\n$$${tex}$$\n` : `$${tex}$`);
+      return;
+    }
+    if (el.tagName === 'IMG') return void out.push((el as HTMLImageElement).alt ? `[image: ${(el as HTMLImageElement).alt}]` : '[image]');
     if (el.tagName === 'BR') return void out.push('\n');
     if (el.tagName === 'DEL') {
       const inner: string[] = [];
@@ -41,6 +51,7 @@ function serialize(node: Node, inCode: boolean, out: string[]) {
   }
   const block = el.nodeType === Node.ELEMENT_NODE && BLOCK.has(el.tagName);
   if (block) out.push('\n');
+  if (el.nodeType === Node.ELEMENT_NODE && CELL.has(el.tagName) && el.previousElementSibling) out.push(' | ');
   for (const c of el.childNodes) serialize(c, inCode, out);
   if (block) out.push('\n');
 }

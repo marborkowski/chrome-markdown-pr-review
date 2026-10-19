@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { lineLabel } from '../lib/anchor';
+import type { PendingComment } from '../types';
 
 export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
 
@@ -15,16 +17,27 @@ export function submitBlocker(event: ReviewEvent, body: string, lineDrafts: numb
 }
 
 interface Props {
-  draftCount: number;
-  lineDraftCount: number;
-  staleCount: number;
+  drafts: PendingComment[];
+  headSha: string;
+  /** A review the user started in GitHub's own UI and hasn't submitted: GitHub allows only one pending review. */
+  pendingReviewUrl?: string | null;
+  /** The summary typed earlier and not submitted yet. */
+  summary: string;
+  onSummary: (text: string) => void;
   busy: boolean;
   onCancel: () => void;
   onSubmit: (event: ReviewEvent, body: string) => void;
+  onOpenDraft: (d: PendingComment) => void;
 }
 
-export function SubmitReview({ draftCount, lineDraftCount, staleCount, busy, onCancel, onSubmit }: Props) {
-  const [body, setBody] = useState('');
+export function SubmitReview({ drafts, headSha, pendingReviewUrl, summary, onSummary, busy, onCancel, onSubmit, onOpenDraft }: Props) {
+  const draftCount = drafts.length;
+  const lineDraftCount = drafts.filter((d) => d.kind === 'line').length;
+  const staleCount = drafts.filter((d) => d.sha && d.sha !== headSha).length;
+  const body = summary;
+  const setBody = onSummary;
+  const byFile = new Map<string, PendingComment[]>();
+  for (const d of drafts) byFile.set(d.path, [...(byFile.get(d.path) ?? []), d]);
   const [event, setEvent] = useState<ReviewEvent>('COMMENT');
   const options: { v: ReviewEvent; label: string; hint: string }[] = [
     { v: 'COMMENT', label: 'Comment', hint: 'Submit general feedback without explicit approval.' },
@@ -53,9 +66,30 @@ export function SubmitReview({ draftCount, lineDraftCount, staleCount, busy, onC
         <p className="mdr-muted">
           {draftCount ? `${draftCount} draft comment${draftCount === 1 ? '' : 's'} will be submitted with this review.` : 'No draft comments yet.'}
         </p>
+        {draftCount > 0 && (
+          <ul className="mdr-draft-list">
+            {[...byFile].map(([path, list]) => (
+              <li key={path}>
+                <span className="mdr-draft-file">{path}</span>
+                {list.map((d) => (
+                  <button key={d.id} className={`mdr-draft-chip${d.sha && d.sha !== headSha ? ' mdr-draft-stale' : ''}`} onClick={() => onOpenDraft(d)} title={d.body.slice(0, 200)}>
+                    {d.kind === 'file' ? 'file · ' : ''}
+                    {lineLabel(d.start, d.end, d.side)}
+                  </button>
+                ))}
+              </li>
+            ))}
+          </ul>
+        )}
         {staleCount > 0 && (
           <p className="mdr-warn">
             {staleCount} draft{staleCount === 1 ? ' was' : 's were'} written on an older version of this pull request – check the lines still match.
+          </p>
+        )}
+        {pendingReviewUrl && (
+          <p className="mdr-warn">
+            You have a pending review started in GitHub's own interface. GitHub allows one pending review at a time, so submit or discard it{' '}
+            <a href={pendingReviewUrl} target="_blank" rel="noreferrer">on GitHub</a> first.
           </p>
         )}
         <textarea autoFocus rows={5} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Leave a summary (optional)" />

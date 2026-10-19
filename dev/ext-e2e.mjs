@@ -63,7 +63,7 @@ page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && errors.push(m.text()));
 await page.goto(`${origin}/acme/payments/pull/42/files`);
 await page.locator('.mdr-launcher').waitFor({ timeout: 10000 });
-assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*3/);
+assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*4/);
 await page.locator('.mdr-launcher').click();
 await page.locator('.mdr-doc h1').waitFor();
 
@@ -76,6 +76,13 @@ assert.equal(await flow.locator('.node.mdrAdded').count(), 1, 'merged Changes vi
 await page.locator('.mdr-mermaid').nth(2).locator('.mdr-mermaid-pane svg').nth(1).waitFor({ timeout: 15000 });
 assert.equal(await page.locator('.mdr-banner-del').count(), 0, 'every diagram rendered');
 await page.screenshot({ path: `${shots}/13-ghe-mermaid.png` });
+
+// Math: KaTeX is import()ed from the extension too, and renders MathML.
+await page.locator('.mdr-file', { hasText: 'guide.md' }).click();
+await page.locator('.mdr-doc h1', { hasText: 'Operator guide' }).waitFor();
+await page.locator('.mdr-doc .mdr-math math').first().waitFor({ timeout: 10000 });
+assert.equal(await page.locator('.mdr-doc .markdown-alert-warning').count(), 1, 'admonition rendered');
+
 await page.locator('.mdr-file', { hasText: 'architecture' }).click();
 await page.locator('.mdr-doc h1', { hasText: 'Payments service architecture' }).waitFor();
 

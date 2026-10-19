@@ -16,6 +16,8 @@
       window.__MDR_HARNESS__ = true;
       // import() needs an absolute URL; a relative one would resolve against out/harness.js.
       window.__MDR_MERMAID_URL__ = new URL('out/mermaid.js', location.href).href;
+      window.__MDR_KATEX_URL__ = new URL('out/katex.js', location.href).href;
+      window.__MDR_REVIEW_URL__ = new URL('out/review.js', location.href).href;
       if (location.hash === '#dark') document.documentElement.dataset.colorMode = 'dark';
     </script>
   </head>

@@ -5,6 +5,13 @@ import type { ApiRequest, ApiResponse, RuntimeMessage } from '../shared/messages
 // GitHub API proxy. Tokens never leave the service worker / extension storage.
 // ---------------------------------------------------------------------------
 
+/**
+ * Conditional requests for single GETs: the review polls the pull request while it is open, and
+ * GitHub doesn't count a 304 Not Modified against the rate limit. Keyed by URL and token.
+ */
+const etags = new Map<string, { etag: string; data: unknown }>();
+const ETAG_LIMIT = 200;
+
 async function handleApi(req: ApiRequest): Promise<ApiResponse> {
   const hosts = await loadHosts();
   const host: HostConfig | undefined = hosts[req.origin];
@@ -24,6 +31,11 @@ async function handleApi(req: ApiRequest): Promise<ApiResponse> {
     url += (url.includes('?') ? '&' : '?') + 'per_page=100';
   }
 
+  const conditional = (req.method ?? 'GET') === 'GET' && !req.paginate && req.accept !== 'raw';
+  const cacheKey = `${host.token ?? ''}\n${url}`;
+  const cached = conditional ? etags.get(cacheKey) : undefined;
+  if (cached) headers['If-None-Match'] = cached.etag;
+
   const out: any[] = [];
   for (let page = 0; page < 50; page++) {
     let res: Response;
@@ -38,6 +50,8 @@ async function handleApi(req: ApiRequest): Promise<ApiResponse> {
     } catch (e: any) {
       return { ok: false, status: 0, error: `Network error contacting ${new URL(url).host}: ${e?.message ?? e}` };
     }
+
+    if (res.status === 304 && cached) return { ok: true, status: 200, data: cached.data };
 
     if (!res.ok) {
       let message = `${res.status} ${res.statusText}`;
@@ -59,7 +73,14 @@ async function handleApi(req: ApiRequest): Promise<ApiResponse> {
       return { ok: false, status: res.status, error: data.errors.map((e: any) => e.message).join('; ') };
     }
 
-    if (!req.paginate) return { ok: true, status: res.status, data };
+    if (!req.paginate) {
+      const etag = conditional ? res.headers.get('ETag') : null;
+      if (etag) {
+        if (etags.size >= ETAG_LIMIT) etags.delete(etags.keys().next().value!);
+        etags.set(cacheKey, { etag, data });
+      }
+      return { ok: true, status: res.status, data };
+    }
     out.push(...(Array.isArray(data) ? data : [data]));
     const next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('Link') ?? '')?.[1];
     if (!next) break;

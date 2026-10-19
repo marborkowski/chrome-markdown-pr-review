@@ -1,28 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, drafts as draftStore, gh } from '../api';
-import { narrowLines, resolveAnchor } from '../lib/anchor';
-import { contentFromRemovedPatch, parsePatch, type DiffInfo } from '../lib/patch';
+import { locateRemoved, narrowLines, resolveAnchor, type Anchor, type Side } from '../lib/anchor';
+import { anchorsOf, runChecks, type Finding } from '../lib/checks';
+import { findAnchor } from '../lib/gfm';
+import { outlineOf, parseMarkdown, type OutlineItem } from '../lib/outline';
+import { baseLines, contentFromRemovedPatch, diffTexts, emptyDiff, headToBase, parsePatch, presentDiff, type DiffInfo } from '../lib/patch';
 import { rangeToQuote } from '../lib/quote';
-import { prKey, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread, type ThreadState } from '../types';
+import { prKey, type Commit, type Compare, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread, type ThreadState } from '../types';
 import { Composer, type ComposerTarget } from './Composer';
 import { ErrorBoundary } from './ErrorBoundary';
-import { findAnchor } from '../lib/gfm';
-import { makeUrlResolver, MarkdownDoc, reveal } from './MarkdownDoc';
+import { FileNav } from './FileNav';
+import { makeUrlResolver, MarkdownDoc, reveal, type AssetChange } from './MarkdownDoc';
+import { CompareMenu, Help, ViewMenu, type CompareChoice, type ViewOptions } from './Menus';
 import { SourceDoc } from './SourceDoc';
+import { SplitView } from './SplitView';
 import { needsReviewCall, SubmitReview, type ReviewEvent } from './SubmitReview';
-import { buildThreads, ThreadsPanel } from './Threads';
+import { buildThreads, ThreadsPanel, type Focus } from './Threads';
 import { WordDiff } from './WordDiff';
 
-interface Props {
+export interface ReviewProps {
   ctx: PrContext;
   pr: PullRequest;
+  /** The PR's Markdown files. */
   files: PrFile[];
+  /** Every file of the PR (images the documents show, …). */
+  allFiles?: PrFile[];
   onClose: () => void;
   onReload: () => void;
 }
 
-type Toolbar = { rect: DOMRect; start: number; end: number; quote: string };
+type Mode = 'rendered' | 'split' | 'source';
+type Toolbar = { rect: DOMRect; start: number; end: number; side: Side; quote: string; phrase: string };
+type Hover = { start: number; end: number; side: Side; top: number; left: number; el: HTMLElement };
 type Toast = { kind: 'ok' | 'err'; text: string } | null;
+type Text = { text?: string; error?: string };
 
 const pref = {
   get: (k: string, d: string) => {
@@ -33,46 +44,96 @@ const pref = {
   },
 };
 
-const STATUS: Record<string, { letter: string; cls: string }> = {
-  added: { letter: 'A', cls: 'add' },
-  removed: { letter: 'D', cls: 'del' },
-  renamed: { letter: 'R', cls: 'ren' },
-  copied: { letter: 'C', cls: 'ren' },
-};
-
-function splitPath(p: string) {
-  const i = p.lastIndexOf('/');
-  return i < 0 ? { dir: '', name: p } : { dir: p.slice(0, i + 1), name: p.slice(i + 1) };
-}
-
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-export function Review({ ctx, pr, files, onClose, onReload }: Props) {
+/** Removed text (left side of the diff): removed blocks and rows, deleted source lines, the old version in split view. */
+const OLD_AREA = '.mdr-removed, .mdr-removed-row, .mdr-src-del, .mdr-split-before';
+/** Old versions that aren't lines of the base file (a diagram's or formula's previous rendering): not commentable. */
+const NOT_COMMENTABLE = '.mdr-mermaid-old, g.mdrRemoved, .mdr-math-old, .mdr-img-before, .mdr-removed-moved';
+
+/** A selection's text as it reads now: struck-out (deleted) words and image placeholders left out. */
+const phraseOf = (quote: string) =>
+  quote
+    .replace(/~~[^~\n]*~~/g, ' ')
+    .replace(/\S̶/g, '')
+    .replace(/\[image(?::[^\]]*)?\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+/** What to match against source lines: everything selected, without strike markers and image placeholders. */
+const matchText = (quote: string) => quote.replace(/~~/g, '').replace(/̶/g, '').replace(/\[image(?::[^\]]*)?\]/g, ' ');
+
+/** A block's text as a short quote (for commenting on a whole block). */
+function blockQuote(el: Element): string {
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  const q = rangeToQuote(r);
+  if (q.length <= 300) return q;
+  const cut = q.slice(0, 300);
+  return cut.slice(0, Math.max(cut.lastIndexOf(' '), 200)) + ' …';
+}
+
+const pathOfRaw = (src: string, prefix: string) => {
+  if (!src.startsWith(prefix)) return null;
+  try {
+    return src.slice(prefix.length).split('#')[0].split('/').map(decodeURIComponent).join('/');
+  } catch {
+    return null;
+  }
+};
+const encPath = (p: string) => p.split('/').map(encodeURIComponent).join('/');
+
+export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: ReviewProps) {
   const key = prKey(ctx);
   const [path, setPath] = useState(() => {
     const last = sessionStorage.getItem(`mdr:last:${key}`);
     return files.find((f) => f.filename === last)?.filename ?? files[0]?.filename ?? '';
   });
-  const [contents, setContents] = useState<Record<string, { text?: string; error?: string }>>({});
+  const [contents, setContents] = useState<Record<string, Text>>({});
+  const [baseTexts, setBaseTexts] = useState<Record<string, Text>>({});
   const [comments, setComments] = useState<ReviewComment[]>([]);
   const [threadStates, setThreadStates] = useState<Map<number, ThreadState>>(() => new Map());
   const [viewed, setViewed] = useState<Record<string, boolean> | null>(null);
   const [drafts, setDrafts] = useState<PendingComment[]>([]);
-  const [mode, setMode] = useState<'rendered' | 'source'>(() => (pref.get('mode', 'rendered') as any));
-  const [inline, setInline] = useState(() => pref.get('inline', '1') === '1');
+  const [mode, setMode] = useState<Mode>(() => {
+    const m = pref.get('mode', 'rendered');
+    return m === 'split' || m === 'source' ? m : 'rendered';
+  });
+  const [view, setView] = useState<ViewOptions>(() => ({
+    inline: pref.get('inline', '1') === '1',
+    ignoreWs: pref.get('ws', '1') === '1',
+    fold: pref.get('fold', '0') === '1',
+    docsSyntax: pref.get('docs', '1') === '1',
+  }));
   const [toolbar, setToolbar] = useState<Toolbar | null>(null);
+  const [hover, setHover] = useState<Hover | null>(null);
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
   const [popover, setPopover] = useState<{ mods: number[]; rect: DOMRect } | null>(null);
-  const [focus, setFocus] = useState<[number, number] | null>(null);
+  const [focus, setFocus] = useState<Focus | null>(null);
   const [submitOpen, setSubmitOpen] = useState(false);
+  const [summary, setSummary] = useState('');
+  const [helpOpen, setHelpOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [changeCount, setChangeCount] = useState(0);
+  /** Which change n / p last went to (1-based), shown as "3 / 10". */
+  const [changePos, setChangePos] = useState<number | null>(null);
   const [panelOpen, setPanelOpen] = useState(() => pref.get('panel', '1') === '1');
+  const [commits, setCommits] = useState<Commit[] | null>(null);
+  const [viewer, setViewer] = useState<string | null>(null);
+  const [lastReviewed, setLastReviewed] = useState<string | null>(null);
+  const [pendingReviewUrl, setPendingReviewUrl] = useState<string | null>(null);
+  const [compare, setCompare] = useState<CompareChoice | null>(null);
+  const [compareData, setCompareData] = useState<{ sha: string; data?: Compare; error?: string } | null>(null);
+  const [mergeBase, setMergeBase] = useState<string | null>(null);
+  const [paths, setPaths] = useState<Set<string> | null | undefined>(undefined);
+  const [newHead, setNewHead] = useState<string | null>(null);
+  const [activeHeading, setActiveHeading] = useState<string | null>(null);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
+  const scrollPos = useRef(new Map<string, number>());
 
   const file = files.find((f) => f.filename === path);
 
@@ -97,7 +158,36 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     loadComments();
     gh.viewedStates(ctx).then(setViewed).catch(() => setViewed(null));
     draftStore.load(key).then(setDrafts);
+    gh.commits(ctx).then(setCommits).catch(() => setCommits([]));
+    // Who is reviewing, and their reviews: for "since your last review" and a pending review started in GitHub's UI.
+    Promise.all([gh.viewer(ctx).catch(() => null), gh.reviews(ctx).catch(() => [])]).then(([me, reviews]) => {
+      if (!me) return;
+      setViewer(me.login);
+      const mine = reviews.filter((r) => r.user?.login === me.login);
+      const done = mine.filter((r) => r.state !== 'PENDING' && r.commit_id);
+      setLastReviewed(done.length ? done[done.length - 1].commit_id : null);
+      const pending = mine.find((r) => r.state === 'PENDING');
+      setPendingReviewUrl(pending ? pending.html_url ?? pr.html_url : null);
+    });
   }, [key]);
+
+  // New commits or comments while the review is open: GitHub answers 304 (free) when nothing changed.
+  const knownComments = useRef(pr.review_comments);
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      if (document.hidden) return;
+      gh.pr(ctx)
+        .then((now) => {
+          if (now.head.sha !== pr.head.sha) setNewHead(now.head.sha);
+          if (now.review_comments !== undefined && now.review_comments !== knownComments.current) {
+            knownComments.current = now.review_comments;
+            loadComments();
+          }
+        })
+        .catch(() => {});
+    }, 60_000);
+    return () => window.clearInterval(t);
+  }, [ctx, pr.head.sha, loadComments]);
 
   useEffect(() => {
     if (!file || contents[file.filename]) return;
@@ -113,12 +203,25 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
   }, [file?.filename, pr.head.sha]);
 
   useEffect(() => {
+    if (!compare) return setCompareData(null);
+    let live = true;
+    setCompareData({ sha: compare.sha });
+    gh.compare(ctx, compare.sha, pr.head.sha)
+      .then((data) => live && setCompareData({ sha: compare.sha, data }))
+      .catch((e) => live && setCompareData({ sha: compare.sha, error: errText(e) }));
+    return () => {
+      live = false;
+    };
+  }, [compare?.sha, pr.head.sha]);
+
+  useEffect(() => {
     setToolbar(null);
     setComposer(null);
     setPopover(null);
     setFocus(null);
-    scrollRef.current?.scrollTo({ top: 0 });
-  }, [path]);
+    setHover(null);
+    setChangePos(null);
+  }, [path, mode, compare?.sha]);
 
   const saveDrafts = useCallback(
     (next: PendingComment[]) => {
@@ -128,33 +231,142 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     [key],
   );
 
+  /** Switch files, remembering where the reader was in the one they leave. */
+  const selectPath = useCallback(
+    (p: string) => {
+      const el = scrollRef.current;
+      if (el) scrollPos.current.set(path, el.scrollTop);
+      setPath(p);
+    },
+    [path],
+  );
+
   // ---- derived ------------------------------------------------------------
   const text = file ? contents[file.filename]?.text : undefined;
   const lines = useMemo(() => (text ?? '').split(/\r?\n/), [text]);
-  const rawDiff = useMemo(() => (file && file.status !== 'removed' ? parsePatch(file.patch) : null), [file]);
-  /** For brand-new files every line is "added" – highlighting it all is just noise. */
-  const shownDiff: DiffInfo | null = useMemo(
-    () => (rawDiff && file?.status === 'added' ? { ...rawDiff, added: new Set(), removals: [] } : rawDiff),
-    [rawDiff, file?.status],
-  );
+  /** GitHub's diff of the file: comments can only be anchored to its hunks. */
+  const isRemoved = file?.status === 'removed';
+  const rawDiff = useMemo(() => (file && (file.patch || !isRemoved) ? parsePatch(file.patch) : null), [file, isRemoved]);
+
+  /** What the highlighted changes are computed from. */
+  type Plan = { kind: 'patch'; patch: string } | { kind: 'texts'; sha: string; path: string } | { kind: 'none'; note?: string } | { kind: 'loading'; note: string };
+  const plan = useMemo<Plan>(() => {
+    if (!file || isRemoved) return { kind: 'none' };
+    if (compare) {
+      if (!compareData || (!compareData.data && !compareData.error)) return { kind: 'loading', note: `Loading the changes since ${compare.label}…` };
+      const d = compareData.data;
+      if (!d || d.status === 'diverged' || d.status === 'behind') return { kind: 'texts', sha: compare.sha, path: file.filename };
+      const cf = d.files?.find((f) => f.filename === file.filename);
+      if (!cf) return { kind: 'none', note: `No changes to this file since ${compare.label}.` };
+      if (cf.status === 'added') return { kind: 'none', note: `This file is new since ${compare.label}.` };
+      if (cf.patch) return { kind: 'patch', patch: cf.patch };
+      return { kind: 'texts', sha: compare.sha, path: cf.previous_filename ?? file.filename };
+    }
+    if (file.status === 'added') return { kind: 'none' }; // everything would be green: just noise
+    if (file.patch) return { kind: 'patch', patch: file.patch };
+    if (!file.changes) return { kind: 'none' }; // a pure rename
+    if (!mergeBase) return { kind: 'loading', note: 'GitHub sends no diff for this file (too large) – computing it…' };
+    return { kind: 'texts', sha: mergeBase, path: file.previous_filename ?? file.filename };
+  }, [file, isRemoved, compare, compareData, mergeBase]);
+
+  // GitHub sends no patch for very large diffs: compute it from the merge base instead.
+  useEffect(() => {
+    if (!file || isRemoved || compare || file.patch || file.status === 'added' || !file.changes || mergeBase) return;
+    gh.compare(ctx, pr.base.sha, pr.head.sha)
+      .then((d) => setMergeBase(d.merge_base_commit.sha))
+      .catch(() => setMergeBase(pr.base.sha));
+  }, [file?.filename, compare]);
+
+  const baseKey = plan.kind === 'texts' ? `${plan.sha}:${plan.path}` : null;
+  useEffect(() => {
+    if (plan.kind !== 'texts' || baseTexts[baseKey!]) return;
+    gh.raw(ctx, plan.path, plan.sha)
+      .then((t) => setBaseTexts((b) => ({ ...b, [baseKey!]: { text: t } })))
+      // Not in that commit: the file is new since then.
+      .catch((e) => setBaseTexts((b) => ({ ...b, [baseKey!]: e instanceof ApiError && e.status === 404 ? { text: '' } : { error: errText(e) } })));
+  }, [baseKey]);
+
+  /** The diff the document highlights (before hiding whitespace-only changes). */
+  const displayDiff = useMemo<DiffInfo | null>(() => {
+    if (!file || isRemoved || text === undefined) return null;
+    if (plan.kind === 'patch') return plan.patch === file.patch && rawDiff ? rawDiff : parsePatch(plan.patch);
+    if (plan.kind === 'texts') {
+      const base = baseTexts[baseKey!]?.text;
+      return base === undefined ? emptyDiff(true) : parsePatch(diffTexts(base, text));
+    }
+    return emptyDiff(true);
+  }, [file, isRemoved, text, plan, rawDiff, baseTexts, baseKey]);
+  const shownDiff = useMemo(() => (displayDiff ? presentDiff(displayDiff, view.ignoreWs) : null), [displayDiff, view.ignoreWs]);
+  /** Comments on removed text need GitHub's own diff on screen (their lines are lines of the PR's base). */
+  const leftOk = !!file && !isRemoved && !compare && !!file.patch && plan.kind === 'patch';
+  /** For a deleted file, its patch (all of it removed) anchors comments on the left side. */
+  const anchorDiff = rawDiff;
+
   const threads = useMemo(() => buildThreads(comments, path, threadStates), [comments, path, threadStates]);
   /** Resolved conversations don't get a badge in the document. */
   const threadLines = useMemo(() => threads.filter((t) => t.kind === 'line' && !t.resolved).map((t) => t.end!), [threads]);
   const fileDrafts = useMemo(() => drafts.filter((d) => d.path === path), [drafts, path]);
-  const pendingLines = useMemo(() => fileDrafts.map((d) => d.end), [fileDrafts]);
+  const pendingLines = useMemo(() => fileDrafts.filter((d) => d.side !== 'LEFT').map((d) => d.end), [fileDrafts]);
+  const leftLines = useMemo(
+    () => (leftOk || isRemoved ? [...threads.filter((t) => t.kind === 'left' && !t.resolved).map((t) => t.end!), ...fileDrafts.filter((d) => d.side === 'LEFT').map((d) => d.end)] : []),
+    [threads, fileDrafts, leftOk, isRemoved],
+  );
   const activeRange = useMemo<[number, number] | null>(
-    () => (composer ? [composer.anchor.start, composer.anchor.end] : null),
+    () => (composer && composer.anchor.side === 'RIGHT' ? [composer.anchor.start, composer.anchor.end] : null),
     [composer],
   );
-  const resolveUrl = useMemo(
-    () => makeUrlResolver(ctx.origin, ctx.owner, ctx.repo, file?.status === 'removed' ? pr.base.sha : pr.head.sha, path),
-    [ctx, pr, path, file?.status],
+  const headResolver = useMemo(
+    () => makeUrlResolver(ctx.origin, ctx.owner, ctx.repo, isRemoved ? pr.base.sha : pr.head.sha, path),
+    [ctx, pr, path, isRemoved],
   );
+  const beforeSha = compare?.sha ?? mergeBase ?? pr.base.sha;
+  const baseResolver = useMemo(() => makeUrlResolver(ctx.origin, ctx.owner, ctx.repo, beforeSha, file?.previous_filename ?? path), [ctx, beforeSha, path, file]);
   const threadCount = useMemo(() => {
     const m: Record<string, number> = {};
-    for (const c of comments) if (!c.in_reply_to_id && !threadStates.get(c.id)?.resolved) m[c.path] = (m[c.path] ?? 0) + 1;
+    for (const c of comments) if (!c.in_reply_to_id && !threadStates.get(c.id)?.resolved && c.line != null) m[c.path] = (m[c.path] ?? 0) + 1;
     return m;
   }, [comments, threadStates]);
+
+  /** An image file this PR adds or changes, behind an image of the document. */
+  const assetChange = useCallback(
+    (src: string): AssetChange | null => {
+      const base = `${ctx.origin}/${ctx.owner}/${ctx.repo}/raw/`;
+      const p = pathOfRaw(src, `${base}${pr.head.sha}/`);
+      if (!p) return null;
+      const f = allFiles.find((x) => x.filename === p);
+      if (!f || f.status === 'unchanged') return null;
+      const before = f.status === 'modified' || f.status === 'renamed' || f.status === 'changed' ? `${base}${beforeSha}/${encPath(f.previous_filename ?? f.filename)}` : undefined;
+      return { status: f.status === 'added' || f.status === 'copied' ? 'added' : f.status === 'removed' ? 'removed' : f.status === 'renamed' ? 'renamed' : 'modified', before };
+    },
+    [ctx, pr.head.sha, allFiles, beforeSha],
+  );
+
+  // ---- outline & checks ---------------------------------------------------
+  const tree = useMemo(() => (text ? parseMarkdown(text) : null), [text]);
+  const commentLines = useMemo(() => [...threadLines, ...pendingLines], [threadLines, pendingLines]);
+  const outline = useMemo(() => (tree ? outlineOf(tree, lines, isRemoved ? null : shownDiff, commentLines) : []), [tree, lines, shownDiff, commentLines, isRemoved]);
+  const needsPaths = useMemo(() => !!text && /\]\((?![a-z][a-z0-9+.-]*:|#|\/\/)[^)\s]|(?:src|href)=["'](?![a-z][a-z0-9+.-]*:|#|\/\/)/i.test(text), [text]);
+  useEffect(() => {
+    if (!needsPaths || paths !== undefined) return;
+    setPaths(null);
+    gh.tree(ctx, pr.head.sha)
+      .then((t) => setPaths(t.truncated ? null : new Set(t.tree.map((x) => x.path))))
+      .catch(() => setPaths(null));
+  }, [needsPaths]);
+  const anchorsIn = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const [p, c] of Object.entries(contents)) if (p !== path && c.text !== undefined && files.some((f) => f.filename === p && f.status !== 'removed')) m.set(p, anchorsOf(parseMarkdown(c.text)));
+    return m;
+  }, [contents, path, files]);
+  const findings = useMemo<Finding[]>(
+    () => (tree && !isRemoved ? runChecks({ tree, path, diff: shownDiff, paths: paths ?? undefined, anchorsIn }) : []),
+    [tree, isRemoved, path, shownDiff, paths, anchorsIn],
+  );
+  const broken = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of findings) if (f.url) m.set(headResolver(f.url, f.kind === 'image' ? 'src' : 'href'), f.message);
+    return m;
+  }, [findings, headResolver]);
 
   // ---- selection → comment ------------------------------------------------
   const getSelection = () => {
@@ -162,12 +374,16 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     return (root && 'getSelection' in root && root.getSelection?.()) || document.getSelection();
   };
 
+  /** Base-file lines (for narrowing selections in removed text). */
+  const oldFileLines = useMemo(() => (isRemoved ? lines : displayDiff ? baseLines(displayDiff, lines) : []), [isRemoved, lines, displayDiff]);
+
   const onMouseUp = () => {
     window.setTimeout(() => {
       const sel = getSelection();
-      if (!sel || sel.isCollapsed || !sel.rangeCount || !docRef.current) return setToolbar(null);
+      const area = (mode === 'split' ? docRef.current?.closest('.mdr-split') : docRef.current) as Element | null | undefined;
+      if (!sel || sel.isCollapsed || !sel.rangeCount || !area) return setToolbar(null);
       const range = sel.getRangeAt(0);
-      if (!docRef.current.contains(range.commonAncestorContainer)) return setToolbar(null);
+      if (!area.contains(range.commonAncestorContainer)) return setToolbar(null);
       const quote = rangeToQuote(range);
       if (!quote) return setToolbar(null);
       const elOf = (n: Node) => (n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement);
@@ -176,29 +392,78 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       if (range.endOffset === 0 && range.endContainer !== range.startContainer && range.endContainer.nodeType === Node.ELEMENT_NODE) {
         endEl = startEl; // triple-click selects up to the start of the next block
       }
-      // Removed text can't be commented on: removed blocks, deleted source lines, old diagram versions and removed diagram nodes.
-      const gone = '.mdr-removed, .mdr-src-del, .mdr-mermaid-old, g.mdrRemoved';
-      if (!startEl || !endEl || startEl.closest(gone) || endEl.closest(gone)) {
-        return setToolbar(null);
+      if (!startEl || !endEl || startEl.closest(NOT_COMMENTABLE) || endEl.closest(NOT_COMMENTABLE)) return setToolbar(null);
+      const rect = range.getBoundingClientRect();
+      const phrase = phraseOf(quote);
+      const match = matchText(quote);
+
+      // Removed text: a comment on the left side of the diff.
+      const oldA = startEl.closest(OLD_AREA);
+      const oldB = endEl.closest(OLD_AREA);
+      if (!!oldA !== !!oldB) return setToolbar(null); // half removed, half current: no single side to put it on
+      if (oldA || isRemoved) {
+        if (!leftOk && !isRemoved) return setToolbar(null);
+        const attr = oldA?.matches('.mdr-split-before') || isRemoved ? 'sl' : 'osl';
+        const a = startEl.closest(`[data-${attr}]`);
+        const b = endEl.closest(`[data-${attr}]`);
+        if (!a || !b) return setToolbar(null);
+        const sl = Math.min(Number(a.getAttribute(`data-${attr}`)), Number(b.getAttribute(`data-${attr}`)));
+        const el = Math.max(Number(a.getAttribute(`data-${attr.replace('s', 'e')}`)), Number(b.getAttribute(`data-${attr.replace('s', 'e')}`)));
+        const { start, end } = narrowLines(oldFileLines, sl, el, match);
+        return setToolbar({ rect, start, end, side: 'LEFT', quote, phrase });
       }
+
+      // Deleted words of a word diff: also the left side, located through the block's removals.
+      const delA = startEl.closest('del.mdr-d-del');
+      const delB = endEl.closest('del.mdr-d-del');
       const a = startEl.closest('[data-sl]');
       const b = endEl.closest('[data-sl]');
       if (!a || !b) return setToolbar(null);
       const sl = Math.min(Number(a.getAttribute('data-sl')), Number(b.getAttribute('data-sl')));
       const el = Math.max(Number(a.getAttribute('data-el')), Number(b.getAttribute('data-el')));
-      const { start, end } = narrowLines(lines, sl, el, quote);
-      setToolbar({ rect: range.getBoundingClientRect(), start, end, quote });
+      if (delA && delB && shownDiff) {
+        const loc = leftOk ? locateRemoved(shownDiff.removals, sl, el, match) : null;
+        if (!loc) return setToolbar(null);
+        return setToolbar({ rect, ...loc, side: 'LEFT', quote, phrase });
+      }
+      const { start, end } = narrowLines(lines, sl, el, match);
+      setToolbar({ rect, start, end, side: 'RIGHT', quote, phrase });
     }, 0);
   };
 
+  const anchorFor = (start: number, end: number, side: Side): Anchor => resolveAnchor(anchorDiff, start, end, isRemoved ? 'LEFT' : side);
+
   const openComposer = (suggest: boolean) => {
     if (!toolbar) return;
-    const anchor = file?.status === 'removed'
-      ? { kind: 'file' as const, start: toolbar.start, end: toolbar.end, reason: 'the file was deleted' }
-      : resolveAnchor(rawDiff, toolbar.start, toolbar.end);
     const r = toolbar.rect;
-    setComposer({ anchor, quote: toolbar.quote, suggest, rect: { top: r.top, bottom: r.bottom, left: r.left, width: r.width } });
+    setComposer({ anchor: anchorFor(toolbar.start, toolbar.end, toolbar.side), quote: toolbar.quote, phrase: toolbar.phrase, suggest, rect: { top: r.top, bottom: r.bottom, left: r.left, width: r.width } });
     setToolbar(null);
+  };
+
+  /** The + next to a block: comment on all of it. */
+  const commentOnBlock = (h: Hover, suggest = false) => {
+    const r = h.el.getBoundingClientRect();
+    const quote = blockQuote(h.el);
+    setComposer({ anchor: anchorFor(h.start, h.end, h.side), quote, phrase: '', suggest, rect: { top: r.top, bottom: Math.min(r.bottom, r.top + 60), left: r.left, width: r.width } });
+    setHover(null);
+  };
+
+  const onDocMouseMove = (e: React.MouseEvent) => {
+    if (composer || toolbar) return;
+    const t = e.target as Element;
+    if (t.closest('.mdr-hover-add')) return;
+    const blk = t.closest('[data-block], [data-osl]') as HTMLElement | null;
+    if (!blk || blk.closest(NOT_COMMENTABLE) || (hover && hover.el === blk)) return;
+    const old = !!blk.closest(OLD_AREA) || isRemoved;
+    if (old && !leftOk && !isRemoved) return setHover(null);
+    const inSplitBefore = !!blk.closest('.mdr-split-before');
+    const attr = old && !inSplitBefore && !isRemoved ? 'osl' : 'sl';
+    const start = Number(blk.getAttribute(`data-${attr}`));
+    const end = Number(blk.getAttribute(`data-${attr.replace('s', 'e')}`));
+    if (!start || !end) return setHover(null);
+    const r = blk.getBoundingClientRect();
+    const pane = (blk.closest('.mdr-split-pane, .mdr-main') as HTMLElement | null)?.getBoundingClientRect();
+    setHover({ start, end, side: old ? 'LEFT' : 'RIGHT', top: r.top + 2, left: Math.max((pane?.left ?? 0) + 2, r.left - 30), el: blk });
   };
 
   const submitComment = async (body: string, how: 'now' | 'review') => {
@@ -207,7 +472,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     if (how === 'review') {
       saveDrafts([
         ...drafts,
-        { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, path: file.filename, kind: anchor.kind, start: anchor.start, end: anchor.end, body, quote: composer.quote, createdAt: Date.now(), sha: pr.head.sha },
+        { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, path: file.filename, kind: anchor.kind, side: anchor.side, start: anchor.start, end: anchor.end, body, quote: composer.quote, createdAt: Date.now(), sha: pr.head.sha },
       ]);
       setComposer(null);
       getSelection()?.removeAllRanges();
@@ -216,7 +481,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     setBusy(true);
     try {
       if (anchor.kind === 'line') {
-        await gh.createLineComment(ctx, pr.head.sha, { path: file.filename, body, line: anchor.end, start_line: anchor.start });
+        await gh.createLineComment(ctx, pr.head.sha, { path: file.filename, body, line: anchor.end, start_line: anchor.start, side: anchor.side });
       } else {
         await gh.createFileComment(ctx, pr.head.sha, file.filename, body);
       }
@@ -243,7 +508,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
           pr.head.sha,
           event,
           body,
-          lineDrafts.map((d) => ({ path: d.path, body: d.body, line: d.end, start_line: d.start })),
+          lineDrafts.map((d) => ({ path: d.path, body: d.body, line: d.end, start_line: d.start, side: d.side })),
         );
       }
       remaining = remaining.filter((d) => d.kind !== 'line');
@@ -254,6 +519,8 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
         saveDrafts(remaining);
       }
       setSubmitOpen(false);
+      setSummary('');
+      setLastReviewed(pr.head.sha);
       notify('ok', 'Review submitted');
       loadComments();
     } catch (e) {
@@ -276,6 +543,26 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     }
   };
 
+  const editComment = async (c: ReviewComment, body: string) => {
+    try {
+      await gh.editComment(ctx, c.id, body);
+      await loadComments();
+    } catch (e) {
+      notify('err', `Couldn't update the comment: ${errText(e)}`);
+      throw e;
+    }
+  };
+
+  const deleteComment = async (c: ReviewComment) => {
+    try {
+      await gh.deleteComment(ctx, c.id);
+      await loadComments();
+      notify('ok', 'Comment deleted');
+    } catch (e) {
+      notify('err', `Couldn't delete the comment: ${errText(e)}`);
+    }
+  };
+
   const resolveThread = async (t: Thread, resolved: boolean) => {
     if (!t.threadId) return;
     try {
@@ -295,7 +582,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       if (next) {
         const i = files.findIndex((f) => f.filename === file.filename);
         const nextUnviewed = [...files.slice(i + 1), ...files.slice(0, i)].find((f) => !viewed[f.filename]);
-        if (nextUnviewed) setPath(nextUnviewed.filename);
+        if (nextUnviewed) selectPath(nextUnviewed.filename);
       }
     } catch (e) {
       setViewed({ ...viewed, [file.filename]: !next });
@@ -305,7 +592,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
 
   // ---- navigation ---------------------------------------------------------
   const changeEls = useCallback((): HTMLElement[] => {
-    const all = [...(docRef.current?.querySelectorAll<HTMLElement>('.mdr-added, .mdr-mod, .mdr-removed, .mdr-removed-start') ?? [])];
+    const all = [...(docRef.current?.querySelectorAll<HTMLElement>('.mdr-added, .mdr-mod, .mdr-moved, .mdr-removed, .mdr-removed-row, .mdr-removed-start') ?? [])];
     return all.filter((el, i) => {
       const prev = all[i - 1];
       if (!prev) return true;
@@ -321,35 +608,65 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     return () => cancelAnimationFrame(id);
   });
 
-  const gotoChange = (dir: 1 | -1) => {
-    const els = changeEls();
+  /** The next / previous element of `els` below / above the middle of the view (wrapping around). */
+  const step = (els: HTMLElement[], dir: 1 | -1) => {
     const box = scrollRef.current?.getBoundingClientRect();
-    if (!els.length || !box) return;
+    if (!els.length || !box) return null;
     const mid = box.top + box.height / 2;
-    const target = dir === 1
+    return dir === 1
       ? els.find((e) => e.getBoundingClientRect().top > mid + 4) ?? els[0]
       : [...els].reverse().find((e) => e.getBoundingClientRect().top < mid - 4) ?? els[els.length - 1];
-    reveal(target);
   };
 
-  const jumpToLine = useCallback((line: number) => {
-    const blocks = [...(docRef.current?.querySelectorAll<HTMLElement>('[data-block]') ?? [])];
+  const gotoChange = (dir: 1 | -1) => {
+    const els = changeEls();
+    const target = step(els, dir);
+    if (!target) return;
+    reveal(target);
+    setChangePos(els.indexOf(target) + 1);
+  };
+
+  const gotoThread = (dir: 1 | -1) => {
+    const badges = [...(docRef.current?.closest('.mdr-main')?.querySelectorAll<HTMLElement>('.mdr-badge-thread, .mdr-badge-pending') ?? [])].filter((b) => !b.closest('.mdr-split-before'));
+    const target = step(badges.map((b) => (b.closest('[data-block], .mdr-removed, .mdr-src-line') as HTMLElement) ?? b), dir);
+    if (!target) return;
+    reveal(target);
+    target.querySelector<HTMLElement>('.mdr-badge-thread, .mdr-badge-pending')?.click();
+  };
+
+  /** Scroll to the block holding a line (opening a fold or a collapsed removed block on the way). */
+  const jumpToLine = useCallback((line: number, side: Side = 'RIGHT', retry = true) => {
+    const root = docRef.current?.closest('.mdr-main') ?? docRef.current;
+    if (!root) return;
     let best: HTMLElement | null = null;
     let span = Infinity;
-    for (const b of blocks) {
-      const s = Number(b.dataset.sl);
-      const e = Number(b.dataset.el);
+    const consider = (b: HTMLElement, s: number, e: number) => {
       if (s <= line && line <= e && e - s <= span) {
         best = b;
         span = e - s;
       }
+    };
+    if (side === 'LEFT') {
+      // The old version is on screen in split view; otherwise removed blocks and lines carry base-file numbers.
+      for (const b of root.querySelectorAll<HTMLElement>('.mdr-split-before [data-block]')) consider(b, Number(b.dataset.sl), Number(b.dataset.el));
+      if (!best) for (const b of root.querySelectorAll<HTMLElement>('[data-osl]')) if (b.offsetParent) consider(b, Number(b.dataset.osl), Number(b.dataset.oel));
+    } else {
+      for (const b of docRef.current?.querySelectorAll<HTMLElement>('[data-block]') ?? []) consider(b, Number(b.dataset.sl), Number(b.dataset.el));
+      if (!best && retry) {
+        const fold = [...(docRef.current?.querySelectorAll<HTMLElement>('.mdr-fold') ?? [])].find((f) => Number(f.dataset.foldSl) <= line && line <= Number(f.dataset.foldEl));
+        if (fold) {
+          fold.dispatchEvent(new CustomEvent('mdr-expand'));
+          requestAnimationFrame(() => jumpToLine(line, side, false));
+          return;
+        }
+      }
     }
     if (best) reveal(best);
-    setFocus([line, line]);
+    setFocus({ side, start: line, end: line });
   }, []);
 
-  const onBadge = useCallback((sl: number, el: number) => {
-    setFocus([sl, el]);
+  const onBadge = useCallback((sl: number, el: number, side: Side = 'RIGHT') => {
+    setFocus({ side, start: sl, end: el });
     setPanelOpen(true);
   }, []);
   const onMods = useCallback((mods: number[], anchor: HTMLElement) => {
@@ -372,27 +689,82 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       }
       const f = files.find((x) => x.filename === name);
       if (!f) return false;
-      setPath(f.filename);
+      selectPath(f.filename);
       setPendingAnchor(hash || null);
       return true;
     },
-    [ctx, files],
+    [ctx, files, selectPath],
   );
 
+  // Restore the reading position of a file (or open its #anchor), once it has rendered.
   useEffect(() => {
-    if (!pendingAnchor || text === undefined) return;
+    if (text === undefined) return;
     const id = requestAnimationFrame(() => {
-      const el = findAnchor(docRef.current, pendingAnchor);
-      if (el) reveal(el);
-      setPendingAnchor(null);
+      if (pendingAnchor) {
+        const el = findAnchor(docRef.current, pendingAnchor);
+        if (el) reveal(el);
+        setPendingAnchor(null);
+      } else {
+        scrollRef.current?.scrollTo({ top: scrollPos.current.get(path) ?? 0 });
+      }
     });
     return () => cancelAnimationFrame(id);
-  }, [pendingAnchor, text, mode]);
+  }, [path, text === undefined, pendingAnchor, mode]);
+
+  const onHeading = (o: OutlineItem) => {
+    const el = docRef.current?.querySelector<HTMLElement>(`[data-sl="${o.line}"]`) ?? findAnchor(docRef.current, o.id);
+    if (el) reveal(el);
+    setActiveHeading(o.id);
+  };
+
+  /** The heading of the section being read, for the outline. */
+  const frame = useRef(0);
+  const trackHeading = () => {
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      const box = scrollRef.current?.getBoundingClientRect();
+      if (!box || !docRef.current) return;
+      let id: string | null = null;
+      for (const h of docRef.current.querySelectorAll<HTMLElement>('h1[id], h2[id], h3[id], h4[id], h5[id], h6[id]')) {
+        if (h.getBoundingClientRect().top - box.top > 80) break;
+        id = h.id;
+      }
+      setActiveHeading(id ?? outline[0]?.id ?? null);
+    });
+  };
+
+  const onScroll = () => {
+    if (toolbar) setToolbar(null);
+    if (popover) setPopover(null);
+    if (hover) setHover(null);
+    trackHeading();
+  };
 
   const switchFile = (delta: number) => {
     const i = files.findIndex((f) => f.filename === path);
     const n = files[(i + delta + files.length) % files.length];
-    if (n) setPath(n.filename);
+    if (n) selectPath(n.filename);
+  };
+
+  const setOption = (k: keyof ViewOptions, v: boolean) => {
+    setView((o) => ({ ...o, [k]: v }));
+    pref.set({ inline: 'inline', ignoreWs: 'ws', fold: 'fold', docsSyntax: 'docs' }[k], v ? '1' : '0');
+  };
+  const switchMode = (m: Mode) => {
+    if (m === mode) return;
+    const el = scrollRef.current;
+    if (el) scrollPos.current.set(path, el.scrollTop);
+    setMode(m);
+    pref.set('mode', m);
+    setHover(null);
+  };
+
+  const commentOnFinding = (f: Finding) => {
+    const el = docRef.current?.querySelector<HTMLElement>(`[data-sl="${f.line}"]`);
+    const r = (el ?? docRef.current)?.getBoundingClientRect();
+    if (!r) return;
+    jumpToLine(f.line);
+    setComposer({ anchor: anchorFor(f.line, f.line, 'RIGHT'), quote: '', suggest: false, initialText: `${f.message}.`, rect: { top: r.top, bottom: Math.min(r.bottom, r.top + 40), left: r.left, width: r.width } });
   };
 
   // ---- keyboard -----------------------------------------------------------
@@ -402,6 +774,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     const typing = t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable;
     if (e.key === 'Escape') {
       if (popover) setPopover(null);
+      else if (helpOpen) setHelpOpen(false);
       else if (composer) setComposer(null);
       else if (toolbar) setToolbar(null);
       else if (typing) t.blur(); // leave a reply box first; closing would throw away what was typed
@@ -412,11 +785,20 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'n') gotoChange(1);
     else if (e.key === 'p') gotoChange(-1);
+    else if (e.key === 'j') gotoThread(1);
+    else if (e.key === 'k') gotoThread(-1);
     else if (e.key === ']') switchFile(1);
     else if (e.key === '[') switchFile(-1);
     else if (e.key === 'v') toggleViewed();
+    else if (e.key === 'w') setOption('inline', !view.inline);
+    else if (e.key === 'f') setOption('fold', !view.fold);
+    else if (e.key === '1') switchMode('rendered');
+    else if (e.key === '2') switchMode('split');
+    else if (e.key === '3') switchMode('source');
+    else if (e.key === '?') setHelpOpen((h) => !h);
+    else if (e.key === '/') { e.preventDefault(); filterRef.current?.focus(); }
     else if (e.key === 'c' && toolbar) { e.preventDefault(); openComposer(false); }
-    else if (e.key === 's' && toolbar && file?.status !== 'removed') { e.preventDefault(); openComposer(true); }
+    else if (e.key === 's' && toolbar && toolbar.side === 'RIGHT' && !isRemoved) { e.preventDefault(); openComposer(true); }
     else return;
     e.stopPropagation();
   };
@@ -442,15 +824,126 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
     return () => window.removeEventListener('keydown', h, true);
   }, []);
   useEffect(() => {
-    if (!composer && !submitOpen) rootRef.current?.focus({ preventScroll: true });
-  }, [composer, submitOpen]);
+    if (!composer && !submitOpen && !helpOpen) rootRef.current?.focus({ preventScroll: true });
+  }, [composer, submitOpen, helpOpen]);
 
   // Stop GitHub's global hotkeys while the overlay is open.
   const stopKeys = (e: React.KeyboardEvent) => e.nativeEvent.stopImmediatePropagation?.();
 
   // ---- render -------------------------------------------------------------
   const isViewed = !!(viewed && file && viewed[file.filename]);
-  const viewedCount = viewed ? files.filter((f) => viewed[f.filename]).length : 0;
+  const unchanged = useMemo(() => {
+    const d = compareData?.data;
+    if (!compare || !d || d.status === 'diverged' || d.status === 'behind') return null;
+    const changed = new Set((d.files ?? []).map((f) => f.filename));
+    return new Set(files.filter((f) => !changed.has(f.filename)).map((f) => f.filename));
+  }, [compare, compareData, files]);
+
+  const docProps = {
+    threadLines,
+    pendingLines,
+    activeRange,
+    onBadge,
+    onMods,
+    onLink,
+    leftThreadLines: leftLines,
+    ignoreWhitespace: view.ignoreWs,
+    docsSyntax: view.docsSyntax,
+    mdx: /\.mdx$/i.test(path),
+    broken,
+    assetChange,
+    onJump: jumpToLine,
+  };
+
+  /** The old version for split view: the base text, its removed lines marked (in base numbering). */
+  const before = useMemo(() => {
+    if (mode !== 'split' || !file || text === undefined || !displayDiff || !shownDiff) return null;
+    const source = plan.kind === 'texts' ? baseTexts[baseKey!]?.text ?? '' : file.status === 'added' && !compare ? '' : baseLines(displayDiff, lines).join('\n');
+    const diff = emptyDiff(true);
+    for (const r of shownDiff.removals) {
+      const moved = new Set<number>();
+      for (const m of r.moved ?? []) for (let k = m.from; k < m.to; k++) moved.add(k);
+      r.lines.forEach((l, k) => {
+        if (!l.trim()) return;
+        if (moved.has(k)) diff.moved.set(r.oldStart + k, 0);
+        diff.added.add(r.oldStart + k);
+      });
+    }
+    return { source, diff, map: headToBase(displayDiff, lines.length) };
+  }, [mode, file, text, displayDiff, shownDiff, plan, baseTexts, baseKey, lines, compare]);
+
+  const renderDoc = () => {
+    if (!file || text === undefined) return null;
+    if (mode === 'source') {
+      return (
+        <article ref={docRef} className="markdown-body mdr-doc mdr-mode-source" onMouseUp={onMouseUp} onMouseMove={onDocMouseMove}>
+          <SourceDoc source={text} diff={shownDiff} threadLines={threadLines} pendingLines={pendingLines} leftLines={leftLines} activeRange={activeRange} onBadge={onBadge} />
+        </article>
+      );
+    }
+    const fallback = (e: Error) => (
+      <div className="mdr-banner mdr-banner-del">
+        Couldn't render this file: {e.message}{' '}
+        <button className="mdr-link" onClick={() => switchMode('source')}>Show source</button>
+      </div>
+    );
+    if (mode === 'split' && before && !isRemoved) {
+      return (
+        <div className="mdr-split-wrap" onMouseUp={onMouseUp} onMouseMove={onDocMouseMove}>
+          <SplitView
+            afterRef={scrollRef}
+            headToBase={before.map}
+            beforeLabel={compare ? `Before · ${compare.label}` : `Before · ${pr.base.ref}`}
+            afterLabel={`After · ${pr.head.ref}`}
+            before={
+              before.source.trim() ? (
+                <article className="markdown-body mdr-doc mdr-mode-rendered mdr-doc-before">
+                  <ErrorBoundary key={`b:${file.filename}`} fallback={fallback}>
+                    <MarkdownDoc
+                      {...docProps}
+                      source={before.source}
+                      diff={before.diff}
+                      threadLines={leftOk ? leftLines : []}
+                      pendingLines={[]}
+                      leftThreadLines={[]}
+                      activeRange={composer && composer.anchor.side === 'LEFT' ? [composer.anchor.start, composer.anchor.end] : null}
+                      inlineDiff={false}
+                      resolveUrl={baseResolver}
+                      onBadge={(sl, el) => onBadge(sl, el, 'LEFT')}
+                      onLink={undefined}
+                      broken={undefined}
+                      assetChange={undefined}
+                    />
+                  </ErrorBoundary>
+                </article>
+              ) : (
+                <p className="mdr-muted mdr-empty-doc">{file.status === 'added' || plan.kind === 'none' ? 'The file didn’t exist before.' : 'Loading…'}</p>
+              )
+            }
+            after={
+              <article ref={docRef} className="markdown-body mdr-doc mdr-mode-rendered mdr-doc-after">
+                <ErrorBoundary key={file.filename} fallback={fallback}>
+                  <MarkdownDoc {...docProps} source={text} diff={shownDiff} inlineDiff={false} resolveUrl={headResolver} />
+                </ErrorBoundary>
+              </article>
+            }
+          />
+        </div>
+      );
+    }
+    return (
+      <div className="mdr-doc-wrap">
+        <article ref={docRef} className="markdown-body mdr-doc mdr-mode-rendered" onMouseUp={onMouseUp} onMouseMove={onDocMouseMove}>
+          <ErrorBoundary key={file.filename} fallback={fallback}>
+            <MarkdownDoc {...docProps} source={text} diff={shownDiff} inlineDiff={view.inline} fold={view.fold} resolveUrl={headResolver} />
+          </ErrorBoundary>
+        </article>
+      </div>
+    );
+  };
+
+  const note = plan.kind === 'none' || plan.kind === 'loading' ? plan.note : undefined;
+  const split = mode === 'split' && !isRemoved && !!file && text !== undefined;
 
   return (
     <div className="mdr-overlay" ref={rootRef} tabIndex={-1} onKeyDown={(e) => { onKeyDown(e.nativeEvent); stopKeys(e); }} onKeyUp={stopKeys} onKeyPress={stopKeys}>
@@ -462,76 +955,77 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
           <a href={pr.html_url} target="_blank" rel="noreferrer">{pr.title}</a>
           <span className="mdr-muted"> #{pr.number}</span>
         </div>
-        <div className="mdr-seg" role="tablist">
-          {(['rendered', 'source'] as const).map((m) => (
-            <button key={m} className={mode === m ? 'on' : ''} onClick={() => { setMode(m); pref.set('mode', m); }}>
-              {m === 'rendered' ? 'Rendered' : 'Source'}
+        <div className="mdr-seg" role="tablist" aria-label="Display">
+          {(['rendered', 'split', 'source'] as const).map((m, i) => (
+            <button key={m} role="tab" aria-selected={mode === m} className={mode === m ? 'on' : ''} onClick={() => switchMode(m)} title={`${m === 'rendered' ? 'Rendered document with the changes marked' : m === 'split' ? 'Before and after side by side' : 'Markdown source with the line diff'} (${i + 1})`}>
+              {m === 'rendered' ? 'Rendered' : m === 'split' ? 'Split' : 'Source'}
             </button>
           ))}
         </div>
-        {mode === 'rendered' && (
-          <label className="mdr-toggle" title="Show changed paragraphs as a word-level diff">
-            <input type="checkbox" checked={inline} onChange={(e) => { setInline(e.target.checked); pref.set('inline', e.target.checked ? '1' : '0'); }} />
-            Word diff
-          </label>
-        )}
+        <ViewMenu options={view} onChange={setOption} wordDiffApplies={mode === 'rendered'} />
+        <CompareMenu commits={commits} lastReviewed={lastReviewed} current={compare} headSha={pr.head.sha} onPick={setCompare} />
         <div className="mdr-nav" title="Previous / next change (p / n)">
-          <button className="mdr-icon-btn" onClick={() => gotoChange(-1)} disabled={!changeCount}>↑</button>
-          <span className="mdr-muted">{changeCount} change{changeCount === 1 ? '' : 's'}</span>
-          <button className="mdr-icon-btn" onClick={() => gotoChange(1)} disabled={!changeCount}>↓</button>
+          <button className="mdr-icon-btn" onClick={() => gotoChange(-1)} disabled={!changeCount} aria-label="Previous change">↑</button>
+          <span className="mdr-muted" aria-live="polite">{changePos && changePos <= changeCount ? `${changePos} / ${changeCount}` : `${changeCount} change${changeCount === 1 ? '' : 's'}`}</span>
+          <button className="mdr-icon-btn" onClick={() => gotoChange(1)} disabled={!changeCount} aria-label="Next change">↓</button>
         </div>
         <span className="mdr-spacer" />
-        <button className="mdr-icon-btn" title="Reload pull request" onClick={onReload}>⟳</button>
-        <button className="mdr-icon-btn" title="Toggle comments panel" onClick={() => { setPanelOpen(!panelOpen); pref.set('panel', panelOpen ? '0' : '1'); }}>
+        <button className="mdr-icon-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" onClick={() => setHelpOpen(true)}>?</button>
+        <button className="mdr-icon-btn" title="Reload pull request" aria-label="Reload pull request" onClick={onReload}>⟳</button>
+        <button className="mdr-icon-btn" title="Toggle comments panel" aria-label="Toggle comments panel" onClick={() => { setPanelOpen(!panelOpen); pref.set('panel', panelOpen ? '0' : '1'); }}>
           ☰
         </button>
         <button className="mdr-btn mdr-btn-primary" onClick={() => setSubmitOpen(true)}>
           Finish review{drafts.length ? <span className="mdr-pill">{drafts.length}</span> : null}
         </button>
-        <button className="mdr-icon-btn mdr-close" title="Close (Esc)" onClick={onClose}>✕</button>
+        <button className="mdr-icon-btn mdr-close" title="Close (Esc)" aria-label="Close" onClick={onClose}>✕</button>
       </header>
+      {newHead && (
+        <div className="mdr-newcommits" role="status">
+          New commits were pushed to this pull request ({newHead.slice(0, 7)}). Your drafts are kept.
+          <button className="mdr-btn mdr-btn-small" onClick={onReload}>Reload</button>
+          <button className="mdr-link" onClick={() => setNewHead(null)}>Dismiss</button>
+        </div>
+      )}
 
       <div className={`mdr-body${panelOpen ? '' : ' mdr-no-panel'}`}>
-        <nav className="mdr-files">
-          <div className="mdr-files-head">
-            Markdown files <span className="mdr-count">{files.length}</span>
-            {viewed && <span className="mdr-muted mdr-viewed-count">{viewedCount}/{files.length} viewed</span>}
-          </div>
-          {files.map((f) => {
-            const { dir, name } = splitPath(f.filename);
-            const st = STATUS[f.status];
-            const drafted = drafts.filter((d) => d.path === f.filename).length;
-            return (
-              <button key={f.filename} className={`mdr-file${f.filename === path ? ' on' : ''}${viewed?.[f.filename] ? ' viewed' : ''}`} onClick={() => setPath(f.filename)} title={f.filename}>
-                <span className="mdr-file-name">
-                  {st && <span className={`mdr-status mdr-status-${st.cls}`}>{st.letter}</span>}
-                  <span className="mdr-file-dir">{dir}</span>
-                  <b>{name}</b>
-                </span>
-                <span className="mdr-file-meta">
-                  <span className="mdr-add">+{f.additions}</span>
-                  <span className="mdr-del">−{f.deletions}</span>
-                  {threadCount[f.filename] ? <span>💬 {threadCount[f.filename]}</span> : null}
-                  {drafted ? <span className="mdr-draft-dot">{drafted} draft</span> : null}
-                  {viewed?.[f.filename] && <span className="mdr-check">✓</span>}
-                </span>
-              </button>
-            );
-          })}
-          <div className="mdr-files-foot mdr-muted">
-            <kbd>n</kbd>/<kbd>p</kbd> next/prev change · <kbd>[</kbd>/<kbd>]</kbd> file · <kbd>v</kbd> viewed · select text + <kbd>c</kbd> comment / <kbd>s</kbd> suggest
-          </div>
-        </nav>
+        <FileNav
+          ref={filterRef}
+          files={files}
+          path={path}
+          viewed={viewed}
+          drafts={drafts}
+          threadCount={threadCount}
+          unchanged={unchanged}
+          onSelect={selectPath}
+          outline={outline}
+          activeHeading={activeHeading}
+          onHeading={onHeading}
+        />
 
-        <main className="mdr-main" ref={scrollRef} onScroll={() => { if (toolbar) setToolbar(null); if (popover) setPopover(null); }}>
+        <main
+          className={`mdr-main${split ? ' mdr-main-split' : ''}`}
+          ref={split ? undefined : scrollRef}
+          onScroll={onScroll}
+          onScrollCapture={split ? onScroll : undefined}
+          // The + button sits outside <main> in the DOM: moving onto it must not count as leaving.
+          onMouseLeave={(e) => {
+            if (!(e.relatedTarget instanceof Element && e.relatedTarget.closest('.mdr-hover-add'))) setHover(null);
+          }}
+        >
           {file && (
             <div className="mdr-filebar">
               <span className="mdr-filebar-path">{file.previous_filename ? `${file.previous_filename} → ` : ''}{file.filename}</span>
               <span className="mdr-add">+{file.additions}</span>
               <span className="mdr-del">−{file.deletions}</span>
-              {!file.patch && file.status !== 'removed' && <span className="mdr-warn">Diff too large – comments will be file-level</span>}
+              {!file.patch && file.status !== 'removed' && file.changes > 0 && <span className="mdr-warn" title="GitHub sends no diff for very large changes; the changes shown are computed here.">Large diff – comments will be file-level</span>}
               <span className="mdr-spacer" />
-              <a className="mdr-link" href={`${ctx.origin}/${ctx.owner}/${ctx.repo}/blob/${file.status === 'removed' ? pr.base.sha : pr.head.sha}/${file.filename}`} target="_blank" rel="noreferrer">
+              {!isRemoved && (
+                <button className="mdr-link" onClick={() => setComposer({ anchor: { kind: 'file', side: 'RIGHT', start: 0, end: 0, reason: 'a comment on the whole file' }, quote: '', suggest: false, rect: { top: 120, bottom: 120, left: window.innerWidth / 2, width: 0 } })} title="A comment on the file as a whole">
+                  Comment on file
+                </button>
+              )}
+              <a className="mdr-link" href={`${ctx.origin}/${ctx.owner}/${ctx.repo}/blob/${isRemoved ? pr.base.sha : pr.head.sha}/${encPath(file.filename)}`} target="_blank" rel="noreferrer">
                 View file
               </a>
               {viewed && (
@@ -541,74 +1035,68 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
               )}
             </div>
           )}
-          {file?.status === 'removed' && <div className="mdr-banner mdr-banner-del">This file is deleted in this pull request.</div>}
-          {file?.status === 'added' && <div className="mdr-banner mdr-banner-add">New file</div>}
+          {isRemoved && <div className="mdr-banner mdr-banner-del">This file is deleted in this pull request.{anchorDiff?.hasPatch ? ' Comments go on its removed lines.' : ''}</div>}
+          {file?.status === 'added' && !compare && <div className="mdr-banner mdr-banner-add">New file</div>}
+          {note && <div className="mdr-banner mdr-banner-info">{note}</div>}
+          {compare && compareData?.error && <div className="mdr-banner mdr-banner-info">GitHub couldn't compare the commits ({compareData.error}); changes are computed file by file.</div>}
 
-          <div className="mdr-doc-wrap">
-            {!file && <p className="mdr-muted">No Markdown files in this pull request.</p>}
-            {file && text === undefined && !contents[file.filename]?.error && <div className="mdr-skeleton"><div /><div /><div /><div /></div>}
-            {file && contents[file.filename]?.error && <div className="mdr-banner mdr-banner-del">Couldn't load the file: {contents[file.filename]!.error}</div>}
-            {file && text !== undefined && !text.trim() && <p className="mdr-muted mdr-empty-doc">This file is empty.</p>}
-            {file && text !== undefined && !!text.trim() && (
-              <article ref={docRef} className={`markdown-body mdr-doc mdr-mode-${mode}`} onMouseUp={onMouseUp}>
-                {mode === 'rendered' ? (
-                  <ErrorBoundary
-                    key={file.filename}
-                    fallback={(e) => (
-                      <div className="mdr-banner mdr-banner-del">
-                        Couldn't render this file: {e.message}{' '}
-                        <button className="mdr-link" onClick={() => setMode('source')}>Show source</button>
-                      </div>
-                    )}
-                  >
-                    <MarkdownDoc
-                      source={text}
-                      diff={shownDiff}
-                      threadLines={threadLines}
-                      pendingLines={pendingLines}
-                      activeRange={activeRange}
-                      inlineDiff={inline}
-                      resolveUrl={resolveUrl}
-                      onBadge={onBadge}
-                      onMods={onMods}
-                      onLink={onLink}
-                    />
-                  </ErrorBoundary>
-                ) : (
-                  <SourceDoc source={text} diff={shownDiff} threadLines={threadLines} pendingLines={pendingLines} activeRange={activeRange} onBadge={onBadge} />
-                )}
-              </article>
-            )}
-          </div>
+          {!file && <div className="mdr-doc-wrap"><p className="mdr-muted">No Markdown files in this pull request.</p></div>}
+          {file && text === undefined && !contents[file.filename]?.error && <div className="mdr-doc-wrap"><div className="mdr-skeleton"><div /><div /><div /><div /></div></div>}
+          {file && contents[file.filename]?.error && <div className="mdr-doc-wrap"><div className="mdr-banner mdr-banner-del">Couldn't load the file: {contents[file.filename]!.error}</div></div>}
+          {file && text !== undefined && !text.trim() && <div className="mdr-doc-wrap"><p className="mdr-muted mdr-empty-doc">This file is empty.</p></div>}
+          {file && text !== undefined && !!text.trim() && renderDoc()}
         </main>
 
         {panelOpen && (
-          <aside className="mdr-side">
+          <aside className="mdr-side" aria-label="Conversations">
             <ThreadsPanel
               threads={threads}
               drafts={fileDrafts}
               focus={focus}
               headSha={pr.head.sha}
+              lines={lines}
+              viewer={viewer}
+              findings={findings}
               onJump={jumpToLine}
               onReply={reply}
               onResolve={resolveThread}
+              onEditComment={editComment}
+              onDeleteComment={deleteComment}
               onDeleteDraft={(id) => saveDrafts(drafts.filter((d) => d.id !== id))}
               onEditDraft={(id, body) => saveDrafts(drafts.map((d) => (d.id === id ? { ...d, body } : d)))}
+              onCommentFinding={commentOnFinding}
             />
           </aside>
         )}
       </div>
 
+      {hover && !toolbar && !composer && (
+        <button
+          className="mdr-hover-add"
+          style={{ top: hover.top, left: hover.left }}
+          title={`Comment on ${hover.side === 'LEFT' ? 'this removed text' : 'this block'} (lines ${hover.start}–${hover.end})`}
+          aria-label="Comment on this block"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => commentOnBlock(hover)}
+          onMouseLeave={(e) => {
+            const main = rootRef.current?.querySelector('.mdr-main');
+            if (!(e.relatedTarget instanceof Node && main?.contains(e.relatedTarget))) setHover(null);
+          }}
+        >
+          +
+        </button>
+      )}
+
       {toolbar && !composer && (
         <div className="mdr-toolbar" style={{ top: Math.max(8, toolbar.rect.top - 44), left: toolbar.rect.left + toolbar.rect.width / 2 }} onMouseDown={(e) => e.preventDefault()}>
           <button onClick={() => openComposer(false)} title="Comment (c)">💬 Comment</button>
-          <button onClick={() => openComposer(true)} disabled={file?.status === 'removed'} title="Suggest a change (s)">± Suggest</button>
+          <button onClick={() => openComposer(true)} disabled={isRemoved || toolbar.side === 'LEFT'} title={toolbar.side === 'LEFT' ? 'Suggestions apply to the new version only' : 'Suggest a change (s)'}>± Suggest</button>
         </div>
       )}
 
       {composer && (
         <Composer
-          key={`${composer.anchor.start}-${composer.anchor.end}-${composer.quote.length}`}
+          key={`${composer.anchor.side}-${composer.anchor.start}-${composer.anchor.end}-${composer.quote.length}`}
           target={composer}
           lines={lines}
           hasDrafts={drafts.length > 0}
@@ -647,17 +1135,27 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
 
       {submitOpen && (
         <SubmitReview
-          draftCount={drafts.length}
-          lineDraftCount={drafts.filter((d) => d.kind === 'line').length}
-          staleCount={drafts.filter((d) => d.sha && d.sha !== pr.head.sha).length}
+          drafts={drafts}
+          headSha={pr.head.sha}
+          pendingReviewUrl={pendingReviewUrl}
+          summary={summary}
+          onSummary={setSummary}
           busy={busy}
           onCancel={() => setSubmitOpen(false)}
           onSubmit={submitReview}
+          onOpenDraft={(d) => {
+            setSubmitOpen(false);
+            if (d.path !== path) selectPath(d.path);
+            setPanelOpen(true);
+            window.setTimeout(() => jumpToLine(d.end, d.side ?? 'RIGHT'), 120);
+          }}
         />
       )}
 
+      {helpOpen && <Help onClose={() => setHelpOpen(false)} />}
+
       {toast && (
-        <div className={`mdr-toast mdr-toast-${toast.kind}`} onClick={() => setToast(null)}>
+        <div className={`mdr-toast mdr-toast-${toast.kind}`} role="status" onClick={() => setToast(null)}>
           {toast.text}
         </div>
       )}
