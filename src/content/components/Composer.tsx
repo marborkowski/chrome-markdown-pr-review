@@ -24,6 +24,12 @@ export function buildBody(text: string, quote: string, includeQuote: boolean, an
   return out + text.trim();
 }
 
+/** Show ~~deleted~~ parts of the quote struck through, like GitHub will render them. */
+function quotePreview(quote: string) {
+  const parts = quote.split(/(~~[^~\n]+~~)/);
+  return parts.map((p, i) => (/^~~[^~\n]+~~$/.test(p) ? <del key={i}>{p.slice(2, -2)}</del> : p));
+}
+
 export function Composer({ target, lines, hasDrafts, busy, onCancel, onSubmit }: Props) {
   const { anchor, quote } = target;
   const suggestionText = () =>
@@ -104,7 +110,7 @@ export function Composer({ target, lines, hasDrafts, busy, onCancel, onSubmit }:
       {quote && (
         <label className="mdr-quote">
           <input type="checkbox" checked={includeQuote} onChange={(e) => setIncludeQuote(e.target.checked)} />
-          <blockquote>{quote.length > 280 ? quote.slice(0, 280) + '…' : quote}</blockquote>
+          <blockquote>{quotePreview(quote.length > 280 ? quote.slice(0, 280) + '…' : quote)}</blockquote>
         </label>
       )}
       <textarea

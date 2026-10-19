@@ -8,6 +8,7 @@ const shots = process.argv[2] ?? 'dev/out';
 const head = readFileSync('dev/fixtures/head.md', 'utf8').split('\n');
 const lineOf = (s) => head.findIndex((l) => l.includes(s)) + 1;
 const exe = process.env.CHROMIUM ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+const base = process.env.HARNESS_URL ?? 'http://localhost:8765';
 
 const browser = await chromium.launch({ executablePath: exe });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
@@ -15,7 +16,7 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && errors.push(m.text()));
 
-await page.goto('http://localhost:8765/dev/harness.html');
+await page.goto(`${base}/dev/harness.html`);
 await page.locator('.mdr-launcher').waitFor();
 assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*3/);
 await page.screenshot({ path: `${shots}/01-launcher.png` });
@@ -98,6 +99,13 @@ await page.waitForTimeout(250);
 assert.ok((await page.locator('.mdr-doc ins').count()) > 3, 'inline word diff rendered');
 await page.locator('.mdr-doc h2', { hasText: 'Goals' }).scrollIntoViewIfNeeded();
 await page.screenshot({ path: `${shots}/05-worddiff.png` });
+
+// 4b) Quoting a deleted word of the word diff keeps it struck through.
+await selectText('li', '300');
+await page.keyboard.press('c');
+await page.locator('.mdr-composer blockquote del', { hasText: '300' }).waitFor();
+await page.keyboard.press('Escape');
+assert.equal(await page.locator('.mdr-composer').count(), 0);
 
 // 5) Submit the review.
 await page.locator('.mdr-header button', { hasText: 'Finish review' }).click();
