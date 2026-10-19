@@ -5,7 +5,9 @@ import remarkFrontmatter from 'remark-frontmatter';
 import { BLOCK_TAGS, rehypeAnnotate } from '../lib/annotate';
 import { findAnchor, rehypeHeadingIds, remarkAlerts } from '../lib/gfm';
 import { LIST_MARKER, blockDiffSource, markdownDiffSource, rehypeDiffMarks, type RemovalParts } from '../lib/inlineDiff';
+import { isMermaidCode } from '../lib/mermaidDiff';
 import type { DiffInfo } from '../lib/patch';
+import { MermaidBlock } from './MermaidBlock';
 import { WordDiff } from './WordDiff';
 
 export type UrlResolver = (url: string, key: string) => string;
@@ -97,6 +99,40 @@ export function cleanForInline(tag: string, text: string): string {
 /** Block tags that can't have children (React throws): their gutter hangs beside them instead. */
 const VOID_TAGS = new Set(['hr']);
 
+const hastText = (n: any): string => (n.type === 'text' ? n.value : (n.children ?? []).map(hastText).join(''));
+
+/** The code of a ```mermaid block (a hast <pre> whose first child is <code class="language-mermaid">), else null. */
+function mermaidSource(node: any): string | null {
+  const code = node?.children?.[0];
+  if (!code || code.type !== 'element' || code.tagName !== 'code' || !isMermaidCode(code.properties?.className)) return null;
+  return hastText(code).replace(/\n$/, '');
+}
+
+const MERMAID_FENCE = /^[ \t]*(`{3,}|~{3,})[ \t]*mermaid\b/i;
+
+/** The code of the ```mermaid block in `text`, or null when there is none (the block counts as brand new). */
+function oldMermaidSource(text: string): string | null {
+  const ls = text.split('\n');
+  const open = ls.findIndex((l) => MERMAID_FENCE.test(l));
+  if (open < 0) return null;
+  const fence = MERMAID_FENCE.exec(ls[open])![1];
+  const closing = new RegExp(`^[ \\t]*${fence[0]}{${fence.length},}[ \\t]*$`);
+  const close = ls.findIndex((l, i) => i > open && closing.test(l));
+  return ls.slice(open + 1, close < 0 ? undefined : close).join('\n');
+}
+
+/** The source lines [start, end] of a block as they were before the PR: added lines taken out, removed lines put back. */
+function oldLines(ctx: DocCtxValue, start: number, end: number): string[] {
+  const { added, removals } = ctx.diff!;
+  const out: string[] = [];
+  for (let ln = start; ln <= end; ln++) {
+    // A deletion anchored at the block's first line sat before the block; one at end + 1 belongs to what follows.
+    for (const r of removals) if (r.replacedBy ? r.replacedBy.start === ln : r.anchor === ln && ln > start) out.push(...r.lines);
+    if (!added.has(ln)) out.push(ctx.lines[ln - 1] ?? '');
+  }
+  return out;
+}
+
 const idxList = (v: unknown): number[] =>
   v === undefined || v === null || v === '' ? [] : String(v).split(' ').map(Number);
 
@@ -150,6 +186,15 @@ function Gutter({ threads, pending, mods, sl, el }: { threads: number; pending: 
   );
 }
 
+/** A removed mermaid block is still shown as a diagram (the old code, nothing to compare it with). */
+const removedComponents: Components = {
+  pre: ({ node, children, ...props }: any) => {
+    const source = mermaidSource(node);
+    if (source === null) return <pre {...props}>{children}</pre>;
+    return <MermaidBlock source={source} oldSource={null} changed={false} sourceView={<pre {...props}>{children}</pre>} gutter={null} attrs={{}} />;
+  },
+};
+
 function RemovedBlock({ idx }: { idx: number }) {
   const ctx = useContext(DocCtx);
   const r = ctx.diff?.removals[idx];
@@ -164,7 +209,7 @@ function RemovedBlock({ idx }: { idx: number }) {
       </button>
       {open && (
         <div className="mdr-removed-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={() => ''}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={removedComponents} urlTransform={() => ''}>
             {r.lines.join('\n')}
           </ReactMarkdown>
         </div>
@@ -173,8 +218,35 @@ function RemovedBlock({ idx }: { idx: number }) {
   );
 }
 
+/**
+ * Old and new source of a block that owns a change (its own removals, or its share of a
+ * replacement spanning sibling blocks), with the nested blocks the change doesn't reach.
+ * Null when the block owns nothing: it is simply new, or continues another block's change.
+ */
+function changeOf(ctx: DocCtxValue, props: any, children: any, sl: number, el: number, mods: number[]) {
+  const { removals } = ctx.diff!;
+  const parts = partMap(props['data-mod-part']);
+  const own = mods.filter((i) => removals[i] && !parts.has(i));
+  // A block with no removed lines of its own share is simply new: it renders like any added block.
+  const shared = [...parts].some(([i, [from, to]]) => removals[i] && to > from);
+  if (!own.length && !shared) return null;
+  const repl = own.flatMap((i) => removals[i].replacedBy ?? []);
+  const start = Math.min(sl, ...repl.map((r) => r.start));
+  const reach = Math.max(0, Number(props['data-mod-el'] ?? 0), ...repl.map((r) => r.end));
+  const end = Math.max(el, reach);
+  // Nested blocks the change doesn't reach (e.g. a sub-list) keep rendering as themselves.
+  const nested = Children.toArray(children).filter(
+    (k): k is ReactElement<any> => isValidElement(k) && (k.props as any)['data-block'] !== undefined && Number((k.props as any)['data-sl']) > start,
+  );
+  const cutAt = nested.length ? Number(nested[0].props['data-sl']) : Infinity;
+  const keepNested = cutAt <= end && reach < cutAt;
+  const src = blockDiffSource(ctx.lines, removals, start, keepNested ? cutAt - 1 : end, parts);
+  const rest = own.filter((i) => !src.used.has(i));
+  return { start, end, src, nested, keepNested, rest };
+}
+
 function makeBlock(Tag: string) {
-  return function Block({ node: _node, children, ...props }: any) {
+  return function Block({ node, children, ...props }: any) {
     const ctx = useContext(DocCtx);
     if (Tag === 'div' && props['data-removal'] !== undefined) return <RemovedBlock idx={Number(props['data-removal'])} />;
 
@@ -185,41 +257,38 @@ function makeBlock(Tag: string) {
     const threads = Number(props['data-threads'] ?? 0);
     const pending = Number(props['data-pending'] ?? 0);
     const El = Tag as any;
+    const mermaid = Tag === 'pre' ? mermaidSource(node) : null;
+    const oldMermaid = () => (ctx.diff ? oldMermaidSource(oldLines(ctx, sl, el).join('\n')) : null);
 
     if (ctx.inlineDiff && ctx.diff && Tag !== 'tr' && Tag !== 'table') {
-      const { removals } = ctx.diff;
-      const parts = partMap(props['data-mod-part']);
-      const own = mods.filter((i) => removals[i] && !parts.has(i));
-      // A block with no removed lines of its own share is simply new: it renders like any added block.
-      const shared = [...parts].some(([i, [from, to]]) => removals[i] && to > from);
-      if (!own.length && !shared && cont.length) return null; // rendered as part of the block that starts the change
-      if (own.length || shared) {
-        const repl = own.flatMap((i) => removals[i].replacedBy ?? []);
-        const start = Math.min(sl, ...repl.map((r) => r.start));
-        const reach = Math.max(0, Number(props['data-mod-el'] ?? 0), ...repl.map((r) => r.end));
-        const end = Math.max(el, reach);
-        // Nested blocks the change doesn't reach (e.g. a sub-list) keep rendering as themselves.
-        const nested = Children.toArray(children).filter(
-          (k): k is ReactElement<any> => isValidElement(k) && (k.props as any)['data-block'] !== undefined && Number((k.props as any)['data-sl']) > start,
-        );
-        const cutAt = nested.length ? Number(nested[0].props['data-sl']) : Infinity;
-        const keepNested = cutAt <= end && reach < cutAt;
-        const src = blockDiffSource(ctx.lines, removals, start, keepNested ? cutAt - 1 : end, parts);
+      const change = changeOf(ctx, props, children, sl, el, mods);
+      if (!change && cont.length) return null; // rendered as part of the block that starts the change
+      if (change) {
+        const { start, end, src, nested, keepNested, rest } = change;
         const oldText = cleanForInline(Tag, src.oldText);
         const newText = cleanForInline(Tag, src.newText);
-        const rest = own.filter((i) => !src.used.has(i));
+        const attrs = { ...props, 'data-sl': start, 'data-el': end, className: `${props.className ?? ''} mdr-inline` };
+        const gutter = <Gutter threads={threads} pending={pending} mods={rest} sl={sl} el={el} />;
+        if (mermaid !== null) {
+          const sourceView = <pre><WordDiff oldText={oldText} newText={newText} /></pre>;
+          return <MermaidBlock source={mermaid} oldSource={oldMermaid()} changed sourceView={sourceView} gutter={gutter} attrs={attrs} />;
+        }
         const Wrap = VOID_TAGS.has(Tag) ? 'div' : El; // the word diff needs an element that can hold it
         return (
-          <Wrap {...props} data-sl={start} data-el={end} className={`${props.className ?? ''} mdr-inline`}>
+          <Wrap {...attrs}>
             {Tag === 'pre' ? <WordDiff oldText={oldText} newText={newText} /> : <MarkdownWordDiff oldText={oldText} newText={newText} />}
             {keepNested && nested}
-            <Gutter threads={threads} pending={pending} mods={rest} sl={sl} el={el} />
+            {gutter}
           </Wrap>
         );
       }
     }
 
     const gutter = <Gutter threads={threads} pending={pending} mods={mods} sl={sl} el={el} />;
+    if (mermaid !== null) {
+      const changed = mods.length > 0 || /\bmdr-added\b/.test(props.className ?? '');
+      return <MermaidBlock source={mermaid} oldSource={changed ? oldMermaid() : null} changed={changed} sourceView={<pre>{children}</pre>} gutter={gutter} attrs={props} />;
+    }
     if (Tag === 'tr') {
       // <tr> may only contain cells: put the gutter inside the last cell.
       const kids = Children.toArray(children);

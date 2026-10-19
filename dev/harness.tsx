@@ -8,6 +8,8 @@ import modifiedPatch from './fixtures/modified.patch';
 import readme from './fixtures/readme-head.md';
 import readmePatch from './fixtures/readme.patch';
 import legacyPatch from './fixtures/legacy.patch';
+import flow from './fixtures/flow-head.md';
+import flowPatch from './fixtures/flow.patch';
 
 declare global {
   interface Window {
@@ -49,6 +51,7 @@ const files = [
   { filename: 'README.md', status: 'added', additions: 21, deletions: 0, changes: 21, sha: 'b', patch: readmePatch },
   { filename: 'docs/legacy-export.md', status: 'removed', additions: 0, deletions: 3, changes: 3, sha: 'c', patch: legacyPatch },
   { filename: 'src/payments/adapter.ts', status: 'modified', additions: 40, deletions: 12, changes: 52, sha: 'd', patch: '@@ -1 +1 @@\n-a\n+b' },
+  { filename: 'docs/flow.md', status: 'modified', additions: 5, deletions: 5, changes: 10, sha: 'e', patch: flowPatch },
 ];
 
 const viewed: Record<string, boolean> = { 'README.md': true };
@@ -88,6 +91,7 @@ async function mock(req: ApiRequest): Promise<ApiResponse> {
   if (path.includes('/contents/')) {
     if (path.includes('architecture')) return ok(head);
     if (path.includes('README')) return ok(readme);
+    if (path.includes('flow')) return ok(flow);
     return { ok: false, status: 404, error: 'Not Found' };
   }
   if (path.endsWith('/pulls/42/comments') && method === 'GET') return ok(comments);

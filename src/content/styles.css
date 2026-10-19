@@ -191,10 +191,10 @@ kbd {
 /* changed blocks */
 .mdr-doc .mdr-added { background: var(--add-bg); box-shadow: 0 0 0 4px var(--add-bg); border-radius: 2px; }
 .mdr-doc .mdr-added.mdr-mod, .mdr-doc .mdr-mod { background: var(--mod-bg); box-shadow: 0 0 0 4px var(--mod-bg); }
-.mdr-doc :is(p, h1, h2, h3, h4, h5, h6, pre, blockquote, table, hr):is(.mdr-added, .mdr-mod)::before {
+.mdr-doc :is(p, h1, h2, h3, h4, h5, h6, pre, blockquote, table, hr, .mdr-mermaid):is(.mdr-added, .mdr-mod)::before {
   content: ''; position: absolute; left: -28px; top: 0; bottom: 0; width: 3px; border-radius: 2px; background: var(--add-fg);
 }
-.mdr-doc :is(p, h1, h2, h3, h4, h5, h6, pre, blockquote, table, hr).mdr-mod::before { background: var(--mod-fg); }
+.mdr-doc :is(p, h1, h2, h3, h4, h5, h6, pre, blockquote, table, hr, .mdr-mermaid).mdr-mod::before { background: var(--mod-fg); }
 .mdr-doc pre:is(.mdr-added, .mdr-mod) { box-shadow: none; }
 .mdr-doc pre.mdr-added { background: var(--add-bg); }
 .mdr-doc pre.mdr-mod { background: var(--mod-bg); }
@@ -202,6 +202,37 @@ kbd {
 .mdr-doc tr.mdr-added > * { background: var(--add-bg) !important; }
 .mdr-doc tr.mdr-mod > * { background: var(--mod-bg) !important; }
 .mdr-doc .mdr-inline { background: transparent; box-shadow: none; }
+
+/* mermaid diagrams */
+.mdr-doc .mdr-mermaid { position: relative; margin: 0 0 16px; border-radius: 6px; container-type: inline-size; }
+.mdr-doc .mdr-mermaid > pre { margin: 0; }
+.mdr-doc .mdr-mermaid:is(.mdr-added, .mdr-mod) { padding: 8px 12px 12px; box-shadow: none; }
+.mdr-doc .mdr-mermaid.mdr-added { background: var(--add-bg); }
+.mdr-doc .mdr-mermaid.mdr-mod { background: var(--mod-bg); }
+.mdr-doc .mdr-mermaid:is(.mdr-added, .mdr-mod) > pre { padding: 8px 4px; background: transparent; }
+.mdr-mermaid-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; font-size: 12px; color: var(--muted); user-select: none; -webkit-user-select: none; }
+.mdr-mermaid-bar .mdr-seg button { height: 22px; padding: 0 9px; font-size: 12px; }
+.mdr-mermaid-legend { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.mdr-sw { display: inline-block; width: 12px; height: 12px; margin-right: 4px; border: 2px solid; border-radius: 3px; vertical-align: -2px; }
+.mdr-sw-add { background: var(--add-bg); border-color: var(--add-fg); }
+.mdr-sw-del { background: var(--del-bg); border-color: var(--del-fg); border-style: dashed; }
+.mdr-sw-mod { background: var(--mod-bg); border-color: var(--mod-fg); }
+.mdr-mermaid-note { font-style: italic; }
+.mdr-mermaid-loading { margin-bottom: 6px; font-size: 12px; }
+.mdr-mermaid .mdr-banner { max-width: none; margin: 0 0 8px; }
+.mdr-mermaid-view { padding: 8px; border-radius: 6px; background: var(--bg); overflow-x: auto; }
+.mdr-mermaid-view svg { display: block; max-width: 100%; height: auto; }
+.mdr-mermaid-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+@container (max-width: 700px) { .mdr-mermaid-pair { grid-template-columns: minmax(0, 1fr); } }
+.mdr-mermaid-pane { min-width: 0; }
+.mdr-mermaid-caption { margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+/* Before / After: labels present on one side only (shapes sit next to the label, or one <g> deeper in class / ER nodes) */
+.mdr-mermaid .mdr-svg-added > :is(rect, polygon, path, circle, ellipse), .mdr-mermaid .mdr-svg-added > g > :is(rect, polygon, path, circle, ellipse) { stroke: var(--add-fg) !important; stroke-width: 2.5px !important; fill: var(--add-bg) !important; }
+.mdr-mermaid .mdr-svg-added text, .mdr-mermaid text.mdr-svg-added, .mdr-mermaid .mdr-svg-added text tspan, .mdr-mermaid text.mdr-svg-added tspan { fill: var(--add-fg) !important; }
+.mdr-mermaid .mdr-svg-added foreignObject * { color: var(--add-fg) !important; }
+.mdr-mermaid .mdr-svg-removed > :is(rect, polygon, path, circle, ellipse), .mdr-mermaid .mdr-svg-removed > g > :is(rect, polygon, path, circle, ellipse) { stroke: var(--del-fg) !important; stroke-width: 2.5px !important; stroke-dasharray: 5 3 !important; fill: var(--del-bg) !important; }
+.mdr-mermaid .mdr-svg-removed text, .mdr-mermaid text.mdr-svg-removed, .mdr-mermaid .mdr-svg-removed text tspan, .mdr-mermaid text.mdr-svg-removed tspan { fill: var(--del-fg) !important; }
+.mdr-mermaid .mdr-svg-removed foreignObject * { color: var(--del-fg) !important; }
 
 .mdr-worddiff { white-space: pre-wrap; }
 .mdr-worddiff .mdr-d-ins { background: var(--ins-bg); text-decoration: none; border-radius: 3px; padding: 0 1px; }

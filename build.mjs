@@ -21,21 +21,36 @@ const common = {
   loader: { '.css': 'text', '.md': 'text', '.patch': 'text' },
   define: { 'process.env.NODE_ENV': JSON.stringify(dev ? 'development' : 'production') },
   logLevel: 'info',
+  // src/content/lib/mermaid.ts import()s a runtime URL on purpose; esbuild can't bundle it and must not.
+  logOverride: { 'unsupported-dynamic-import': 'silent' },
 };
 
+// mermaid is not part of content.js (5 MB on every GitHub page): it is built as its own
+// ES module that the content script import()s on demand. Its inputs never change while
+// developing, so it is built once even in watch mode.
+const mermaidBuild = (outfile) => ({
+  entryPoints: ['src/mermaid/entry.ts'],
+  outfile,
+  format: 'esm',
+  minify: true,
+  sourcemap: false,
+  once: true,
+});
+
 const builds = [
-  { entryPoints: { background: 'src/background/index.ts' } },
-  { entryPoints: { content: 'src/content/index.tsx' } },
-  { entryPoints: { options: 'src/options/main.tsx' } },
+  { entryPoints: { background: 'src/background/index.ts' }, outdir },
+  { entryPoints: { content: 'src/content/index.tsx' }, outdir },
+  { entryPoints: { options: 'src/options/main.tsx' }, outdir },
+  mermaidBuild(`${outdir}/mermaid.js`),
 ];
 
 if (process.argv.includes('--harness')) {
-  builds.push({ entryPoints: { harness: 'dev/harness.tsx' }, outdir: 'dev/out' });
+  builds.push({ entryPoints: { harness: 'dev/harness.tsx' }, outdir: 'dev/out' }, mermaidBuild('dev/out/mermaid.js'));
 }
 
-for (const b of builds) {
-  const opts = { ...common, outdir, ...b };
-  if (watch) {
+for (const { once, ...b } of builds) {
+  const opts = { ...common, ...b };
+  if (watch && !once) {
     const ctx = await esbuild.context(opts);
     await ctx.watch();
   } else {

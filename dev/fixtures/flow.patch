@@ -1,0 +1,31 @@
+@@ -6,17 +6,17 @@
+ flowchart TD
+   A[Start]
+   B[Validate]
+-  C{Valid?}
++  C{Valid request?}
+   D[Charge card]
+   E[Reject]
+-  F[Old step]
+   G[Done]
++  N[Notify]
+   A --> B
+   B --> C
+   C -->|yes| D
+   C -->|no| E
+-  D --> F
+-  F --> G
++  D --> N
++  N --> G
+   subgraph Fraud
+     H[Score intent]
+   end
+@@ -38,7 +38,7 @@
+ ```mermaid
+ sequenceDiagram
+   Gateway->>Payments: POST /payments
++  Payments->>Fraud: score intent
+   Payments->>Adapter: charge
+-  Adapter-->>Payments: approved
+   Payments-->>Gateway: 201 Created
+ ```

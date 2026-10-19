@@ -13,6 +13,7 @@
   "dependencies": {
     "diff": "^8.0.2",
     "github-markdown-css": "^5.8.1",
+    "mermaid": "^12.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
@@ -33,5 +34,6 @@
     "vitest": "^2.1.8"
   },
   "private": true,
+  "license": "MIT",
   "type": "module"
 }
