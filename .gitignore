@@ -2,3 +2,4 @@ node_modules/
 dist/
 dev/out/
 *.zip
+.DS_Store
