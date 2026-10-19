@@ -221,9 +221,10 @@ kbd {
 .mdr-mermaid-loading { margin-bottom: 6px; font-size: 12px; }
 .mdr-mermaid .mdr-banner { max-width: none; margin: 0 0 8px; }
 .mdr-mermaid-view { padding: 8px; border-radius: 6px; background: var(--bg); overflow-x: auto; }
-.mdr-mermaid-view svg { display: block; max-width: 100%; height: auto; }
+.mdr-mermaid-view svg { display: block; height: auto; }
 .mdr-mermaid-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 @container (max-width: 700px) { .mdr-mermaid-pair { grid-template-columns: minmax(0, 1fr); } }
+.mdr-mermaid-pair.mdr-mermaid-stack { grid-template-columns: minmax(0, 1fr); }
 .mdr-mermaid-pane { min-width: 0; }
 .mdr-mermaid-caption { margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 /* Before / After: labels present on one side only (shapes sit next to the label, or one <g> deeper in class / ER nodes) */

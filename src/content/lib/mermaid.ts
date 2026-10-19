@@ -85,27 +85,32 @@ let scratch: HTMLElement | undefined;
 
 /**
  * mermaid looks its drawing surface up with document-wide selectors, which don't reach
- * into a shadow root: for a container living in one, draw in a hidden light-DOM element
- * that copies the container's font so text is measured the way it will be shown.
+ * into a shadow root or a detached element (a block unmounted while its job was queued):
+ * for those, draw in a hidden light-DOM element that copies the container's font so text
+ * is measured the way it will be shown. A detached container can't be measured; the font
+ * the last connected block set is kept (every block shares the review's font).
  */
 function drawingSurface(container: Element): Element {
-  if (!(container.getRootNode() instanceof ShadowRoot)) return container;
+  if (container.isConnected && !(container.getRootNode() instanceof ShadowRoot)) return container;
   if (!scratch) {
     scratch = document.createElement('div');
     scratch.setAttribute('aria-hidden', 'true');
     scratch.style.cssText = 'position:absolute;top:0;left:-100000px;visibility:hidden;pointer-events:none';
   }
   if (!scratch.isConnected) document.body.appendChild(scratch);
-  const { fontFamily, fontSize } = getComputedStyle(container);
-  scratch.style.fontFamily = fontFamily;
-  scratch.style.fontSize = fontSize;
+  if (container.isConnected) {
+    const { fontFamily, fontSize } = getComputedStyle(container);
+    scratch.style.fontFamily = fontFamily;
+    scratch.style.fontSize = fontSize;
+  }
   return scratch;
 }
 
 /**
- * Renders `text` and returns the SVG markup. `container` is a connected element the
- * diagram will be shown in (mermaid empties the element it draws in, so don't pass one
- * with content). Throws a plain Error with mermaid's message on failure.
+ * Renders `text` and returns the SVG markup. `container` is the element the diagram
+ * will be shown in (mermaid empties the element it draws in, so don't pass one with
+ * content); it may have been detached meanwhile. Throws a plain Error with mermaid's
+ * message on failure.
  */
 export async function renderMermaid(text: string, theme: Theme, container: Element): Promise<string> {
   const mermaid = await loadMermaid();

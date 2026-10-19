@@ -22,6 +22,7 @@ flowchart TD
   end
   B --> H
   H --> D
+  click A "https://example.com/checkout"
 ```
 
 ## Payment methods

@@ -237,10 +237,83 @@ assert.ok((await texts(panes.nth(1).locator('.mdr-svg-added'))).includes('score 
 assert.equal(await panes.nth(1).locator('.mdr-svg-removed').count(), 0);
 await seq.scrollIntoViewIfNeeded();
 await page.screenshot({ path: `${shots}/14-mermaid-sequence.png` });
+
+// 12) Old diagram text can't be commented on: a selection inside the Before pane shows no toolbar.
+const approved = panes.nth(0).locator('text', { hasText: 'approved' }).first();
+await approved.scrollIntoViewIfNeeded();
+const ab = await approved.boundingBox();
+await page.mouse.move(ab.x + 1, ab.y + ab.height / 2);
+await page.mouse.down();
+await page.mouse.move(ab.x + ab.width - 1, ab.y + ab.height / 2, { steps: 6 });
+await page.mouse.up();
+await page.waitForTimeout(300);
+assert.equal(await page.locator('.mdr-toolbar').count(), 0, 'no comment toolbar for text of the old version');
+assert.equal(await panes.nth(0).locator('.mdr-mermaid-old').count(), 1, 'Before pane is marked as the old version');
+
+// 13) A selection reaching from a paragraph into a diagram quotes the labels, not mermaid's CSS or the view buttons.
+const intro = page.locator('.mdr-doc p', { hasText: 'checkout request' });
+await intro.scrollIntoViewIfNeeded();
+const from = await page.evaluate(() => {
+  const root = document.getElementById('md-pr-review-root').shadowRoot;
+  const p = [...root.querySelectorAll('.mdr-doc p')].find((e) => e.textContent.includes('checkout request'));
+  const n = document.createTreeWalker(p, NodeFilter.SHOW_TEXT).nextNode();
+  const i = n.textContent.indexOf('held');
+  const r = document.createRange();
+  r.setStart(n, i); r.setEnd(n, i + 1);
+  const b = r.getBoundingClientRect();
+  return { x: b.left + 1, y: b.top + b.height / 2 };
+});
+const validate = flow.locator('.node', { hasText: 'Validate' }).first();
+const vb = await validate.boundingBox();
+await page.mouse.move(from.x, from.y);
+await page.mouse.down();
+await page.mouse.move(vb.x + vb.width / 2, vb.y + vb.height / 2, { steps: 10 });
+await page.mouse.up();
+await page.locator('.mdr-toolbar').waitFor();
+await page.keyboard.press('c');
+const quoted = await page.locator('.mdr-composer blockquote').innerText();
+assert.ok(!quoted.includes('{font-family') && !quoted.includes('ChangesAfterBeforeSource'), `quote carries no CSS or chrome: ${quoted.slice(0, 80)}`);
+assert.ok(quoted.includes('held') && quoted.includes('Start'), `quote keeps the text and labels: ${quoted.slice(0, 80)}`);
+await page.keyboard.press('Escape');
+assert.equal(await page.locator('.mdr-composer').count(), 0);
+
+// 14) Links authored in the diagram (`click A "https://…"`) open in a new tab instead of navigating the page;
+//     form controls in labels are stripped and unsafe link targets unwrapped.
+const urlBefore = page.url();
+await page.evaluate(() => {
+  window.__opened = [];
+  window.open = (u) => { window.__opened.push(String(u)); return null; };
+});
+const linked = flow.locator('a').first();
+assert.equal(await linked.getAttribute('target'), '_blank');
+await linked.locator('.node').first().click();
+await page.waitForTimeout(200);
+assert.equal(page.url(), urlBefore, 'the page did not navigate');
+assert.deepEqual(await page.evaluate(() => window.__opened), ['https://example.com/checkout']);
+const hardened = await page.evaluate(() =>
+  window.__hardenSvg(
+    '<svg><a xlink:href="https://x.example/"><text>x</text></a><a href="javascript:alert(1)"><text>js</text></a><a href="docs/other.md"><text>rel</text></a>' +
+      '<foreignObject><form action="https://evil.example"><input name="s"><button>Go</button></form><span>kept</span></foreignObject></svg>',
+  ),
+);
+assert.ok(/<a xlink:href="https:\/\/x\.example\/" target="_blank" rel="noopener noreferrer">/.test(hardened), 'absolute link opens in a new tab');
+assert.ok(!hardened.includes('javascript:') && hardened.includes('<text>js</text>'), 'javascript: link unwrapped');
+assert.ok(/<a href="docs\/other\.md" target="_blank"/.test(hardened), 'relative link kept for the delegated handler');
+assert.ok(!/<form|<input|<button/.test(hardened) && hardened.includes('<span>kept</span>'), 'form controls stripped');
+
+// 15) Dark theme re-renders; switching files while diagrams are still rendering must not leave
+//     error banners behind (the queued jobs then draw into unmounted wrappers).
 await page.evaluate(() => { document.documentElement.dataset.colorMode = 'dark'; });
+await page.locator('.mdr-file', { hasText: 'README' }).click();
+await page.locator('.mdr-doc h1', { hasText: 'Payments service' }).waitFor();
+await page.waitForTimeout(2500);
+await page.locator('.mdr-file', { hasText: 'flow.md' }).click();
+await page.locator('.mdr-doc h1', { hasText: 'Checkout flow' }).waitFor();
+await page.locator('.mdr-mermaid-loading').first().waitFor({ state: 'detached', timeout: 15000 });
+await page.locator('.mdr-mermaid-pane svg').nth(1).waitFor({ timeout: 15000 });
+assert.equal(await page.locator('.mdr-banner-del').count(), 0, 'no diagram errors after switching files mid-render');
+assert.equal(await page.locator('.mdr-mermaid svg').count(), 4, 'merged flowchart, pie and the sequence pair rendered in dark');
 await flow.scrollIntoViewIfNeeded();
-await flow.locator('.mdr-mermaid-loading').waitFor({ state: 'detached' });
-await flow.locator('svg').waitFor();
 await page.waitForTimeout(300);
 await page.screenshot({ path: `${shots}/15-mermaid-dark.png` });
 await page.evaluate(() => { document.documentElement.dataset.colorMode = 'light'; });

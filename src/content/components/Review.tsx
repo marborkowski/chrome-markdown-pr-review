@@ -176,7 +176,9 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       if (range.endOffset === 0 && range.endContainer !== range.startContainer && range.endContainer.nodeType === Node.ELEMENT_NODE) {
         endEl = startEl; // triple-click selects up to the start of the next block
       }
-      if (!startEl || !endEl || startEl.closest('.mdr-removed, .mdr-src-del') || endEl.closest('.mdr-removed, .mdr-src-del')) {
+      // Removed text can't be commented on: removed blocks, deleted source lines, old diagram versions and removed diagram nodes.
+      const gone = '.mdr-removed, .mdr-src-del, .mdr-mermaid-old, g.mdrRemoved';
+      if (!startEl || !endEl || startEl.closest(gone) || endEl.closest(gone)) {
         return setToolbar(null);
       }
       const a = startEl.closest('[data-sl]');
