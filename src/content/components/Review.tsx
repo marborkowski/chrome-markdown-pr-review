@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, drafts as draftStore, gh } from '../api';
 import { narrowLines, resolveAnchor } from '../lib/anchor';
 import { contentFromRemovedPatch, parsePatch, type DiffInfo } from '../lib/patch';
+import { rangeToQuote } from '../lib/quote';
 import { prKey, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread, type ThreadState } from '../types';
 import { Composer, type ComposerTarget } from './Composer';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -167,7 +168,7 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
       if (!sel || sel.isCollapsed || !sel.rangeCount || !docRef.current) return setToolbar(null);
       const range = sel.getRangeAt(0);
       if (!docRef.current.contains(range.commonAncestorContainer)) return setToolbar(null);
-      const quote = sel.toString().trim();
+      const quote = rangeToQuote(range);
       if (!quote) return setToolbar(null);
       const elOf = (n: Node) => (n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement);
       const startEl = elOf(range.startContainer);

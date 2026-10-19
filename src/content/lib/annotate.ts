@@ -105,10 +105,17 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
           const o = first > 0 ? ownerOf(first) : null;
           if (o) {
             const group = [o];
+            let cut = false;
             for (let l = first + 1; l <= r.replacedBy.end; l++) {
               if (isBlank(l)) continue;
               const c = ownerOf(l);
-              if (c && !group.includes(c) && !CONTAINERS.has(c.node.tagName)) group.push(c);
+              if (!c || group.includes(c) || CONTAINERS.has(c.node.tagName)) continue;
+              // A code block can't be shown inside another block's word diff: a new one stays its own added block.
+              if (c.node.tagName === 'pre') {
+                cut = true;
+                break;
+              }
+              group.push(c);
             }
             const parts = splitAmong(r, first, group);
             if (parts) {
@@ -122,6 +129,8 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
             appendIdx(o.node, 'dataMods', i);
             addClass(o.node, 'mdr-mod');
             for (const c of group.slice(1)) appendIdx(c.node, 'dataModCont', i);
+            // The owner's share stops before the code block: all removed lines against the new lines up to it.
+            if (cut) appendIdx(o.node, 'dataModPart', `${i}:0:${r.lines.length}`);
             // Blocks continuing the change are rendered inside the owner's inline diff, whole.
             const reach = Math.max(...group.map((b) => b.el));
             if (reach > o.el) o.node.properties.dataModEl = Math.max(Number(o.node.properties.dataModEl ?? 0), reach);

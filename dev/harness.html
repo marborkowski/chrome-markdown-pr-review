@@ -12,7 +12,12 @@
       .gh-tabs { display: flex; gap: 16px; border-bottom: 1px solid #d1d9e0; margin: 16px 0; padding-bottom: 8px; color: #59636e; }
       .gh-box { border: 1px solid #d1d9e0; border-radius: 6px; height: 360px; background: #f6f8fa; }
     </style>
-    <script>window.__MDR_HARNESS__ = true; if (location.hash === '#dark') document.documentElement.dataset.colorMode = 'dark';</script>
+    <script>
+      window.__MDR_HARNESS__ = true;
+      // import() needs an absolute URL; a relative one would resolve against out/harness.js.
+      window.__MDR_MERMAID_URL__ = new URL('out/mermaid.js', location.href).href;
+      if (location.hash === '#dark') document.documentElement.dataset.colorMode = 'dark';
+    </script>
   </head>
   <body>
     <div class="gh-head"><b>acme / payments</b></div>

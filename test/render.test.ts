@@ -152,9 +152,16 @@ describe('inline word diff', () => {
 
   it('still folds a change into the first block when the blocks are of different kinds', () => {
     const before = 'The adapter is synchronous.';
+    const html = inline(before, 'The adapter is asynchronous.\n\n## Events');
+    expect(html).not.toContain('<h2');
+    expect(strip(html)).toContain('Events');
+  });
+
+  it('keeps a new code block after a rewritten paragraph as its own block', () => {
+    const before = 'The adapter is synchronous.';
     const html = inline(before, 'The adapter is asynchronous.\n\n```js\npublish(event);\n```');
-    expect(html).not.toContain('<pre');
-    expect(strip(html)).toContain('publish(event);');
+    expect(html).toMatch(/<del class="mdr-d-del">synchronous<\/del>/);
+    expect(html).toMatch(/<pre [^>]*class="mdr-added"><code class="language-js"[^>]*>publish\(event\);/);
   });
 
   it('marks formatting changes without breaking the surrounding code spans', () => {
@@ -163,6 +170,59 @@ describe('inline word diff', () => {
     expect(html).toContain('<code>applyPermissionChange</code>');
     expect(html).toContain('<code><del class="mdr-d-del">clear</del></code><del class="mdr-d-del">, </del><code>manage</code>');
     expect(html).toContain('<code>manage</code>');
+  });
+});
+
+describe('mermaid blocks', () => {
+  const flow = '```mermaid\nflowchart TD\n  A --> B\n```';
+
+  it('wraps a ```mermaid block in a diagram container that shows the source until it renders', () => {
+    const html = render(`Intro\n\n${flow}\n`);
+    const block = /<div data-sl="3" data-el="6" data-block="" class="mdr-mermaid">([\s\S]*?)<\/div>\s*$/.exec(html);
+    expect(block, 'wrapper rendered').not.toBeNull();
+    expect(block![1]).toContain('Rendering diagram');
+    expect(block![1]).toMatch(/<pre><code class="language-mermaid"[^>]*>flowchart TD\n {2}A --&gt; B\n<\/code><\/pre>/);
+    expect(block![1]).toMatch(/<button[^>]*>After<\/button><button[^>]*>Source<\/button>/);
+    expect(block![1]).not.toContain('>Changes<');
+  });
+
+  it('offers Changes / Before for a block modified in the PR, also as a word diff', () => {
+    const after = flow.replace('B', 'C');
+    const html = render(after, { diff: patchOf(flow, after) });
+    expect(html).toMatch(/<div data-sl="1"[^>]*class="mdr-mermaid mdr-added mdr-mod"/);
+    expect(html).toMatch(/>Changes<\/button><button[^>]*>After<\/button><button[^>]*>Before<\/button><button[^>]*>Source<\/button>/);
+    const word = inline(flow, after);
+    expect(word).toMatch(/<div [^>]*class="mdr-mermaid mdr-added mdr-mod mdr-inline"[^>]*>[\s\S]*<pre><span class="mdr-worddiff">/);
+    expect(word).toMatch(/<del class="mdr-d-del">B<\/del>/);
+  });
+
+  it('recovers the old code of a block that only gained lines', () => {
+    const after = flow.replace('  A --> B\n', '  A --> B\n  B --> C\n');
+    const html = render(after, { diff: patchOf(flow, after) });
+    expect(html).toContain('class="mdr-mermaid mdr-added"');
+    expect(html).toContain('>Changes<');
+    expect(html).toContain('>Before<');
+  });
+
+  it('treats a block that was not a mermaid diagram before as new', () => {
+    const html = render(flow, { diff: patchOf('Some paragraph.', flow) });
+    expect(html).toContain('class="mdr-mermaid mdr-added mdr-mod"');
+    expect(html).not.toContain('>Before<');
+    expect(html).not.toContain('>Changes<');
+  });
+
+  it('keeps a new diagram after a rewritten paragraph out of that paragraph\'s word diff', () => {
+    const html = inline('The adapter is synchronous.\n', `The adapter is **asynchronous**.\n\n${flow}\n`);
+    expect(html).toMatch(/<p [^>]*class="mdr-added mdr-mod mdr-inline"[^>]*><span class="mdr-worddiff mdr-worddiff-md">/);
+    expect(html).toMatch(/<del class="mdr-d-del">synchronous<\/del>/);
+    expect(html).toMatch(/<div data-sl="3" data-el="6"[^>]*class="mdr-mermaid mdr-added"/);
+    expect(strip(html).match(/flowchart TD/g)).toHaveLength(1);
+  });
+
+  it('leaves other code blocks alone', () => {
+    const html = render('```js\nconst a = 1;\n```\n');
+    expect(html).not.toContain('mdr-mermaid');
+    expect(html).toMatch(/^<pre data-sl="1" data-el="3" data-block=""><code class="language-js"/);
   });
 });
 

@@ -17,13 +17,14 @@ page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && e
 
 await page.goto('http://localhost:8765/dev/harness.html');
 await page.locator('.mdr-launcher').waitFor();
-assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*3/);
+assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*4/);
 await page.screenshot({ path: `${shots}/01-launcher.png` });
 
 await page.locator('.mdr-launcher').click();
 await page.locator('.mdr-doc h1').waitFor();
+await page.locator('.mdr-mermaid svg').waitFor({ timeout: 15000 }); // the new sequence diagram of architecture.md
 await page.waitForTimeout(400);
-assert.equal(await page.locator('.mdr-file').count(), 3, 'only markdown files listed');
+assert.equal(await page.locator('.mdr-file').count(), 4, 'only markdown files listed');
 await page.screenshot({ path: `${shots}/02-overview.png` });
 
 /** Drag-select `needle` inside the first element matching `sel` that contains it. */
@@ -115,10 +116,10 @@ await page.waitForTimeout(300);
 await page.screenshot({ path: `${shots}/07-after-submit.png` });
 
 // 6) Source view, removed file, dark mode.
-await page.locator('.mdr-seg button', { hasText: 'Source' }).click();
+await page.locator('.mdr-header .mdr-seg button', { hasText: 'Source' }).click();
 await page.waitForTimeout(200);
 await page.screenshot({ path: `${shots}/08-source.png` });
-await page.locator('.mdr-seg button', { hasText: 'Rendered' }).click();
+await page.locator('.mdr-header .mdr-seg button', { hasText: 'Rendered' }).click();
 await page.locator('.mdr-file', { hasText: 'legacy-export' }).click();
 await page.locator('.mdr-banner-del').waitFor();
 await page.locator('.mdr-file', { hasText: 'README' }).click();
@@ -171,6 +172,71 @@ await page.locator('.mdr-composer .mdr-warn').waitFor();
 await page.keyboard.press('Escape');
 assert.equal(await page.locator('.mdr-composer').count(), 0, 'second Esc discards');
 
+// 11) Mermaid: a changed flowchart gets one merged "Changes" diagram, other changed diagram
+//     types a Before / After pair; After / Before / Source show the single versions and the code.
+const texts = (loc) => loc.evaluateAll((els) => els.map((e) => e.textContent.trim()));
+async function switchView(block, name) {
+  await block.locator('.mdr-seg button', { hasText: name }).click();
+  await block.locator('.mdr-mermaid-loading').waitFor({ state: 'detached' });
+  assert.equal(await block.locator('.mdr-banner-del').count(), 0, `${name} view rendered without errors`);
+}
+await page.locator('.mdr-file', { hasText: 'flow.md' }).click();
+await page.locator('.mdr-doc h1', { hasText: 'Checkout flow' }).waitFor();
+const flow = page.locator('.mdr-mermaid').nth(0);
+await flow.locator('svg').waitFor({ timeout: 15000 });
+assert.deepEqual(await flow.locator('.mdr-seg button').allInnerTexts(), ['Changes', 'After', 'Before', 'Source']);
+assert.equal(await flow.locator('.mdr-seg button.on').innerText(), 'Changes', 'a modified flowchart opens on the Changes view');
+assert.equal(await flow.locator('svg').count(), 1, 'one merged diagram');
+assert.deepEqual(await texts(flow.locator('.node.mdrAdded')), ['Notify']);
+assert.deepEqual(await texts(flow.locator('.node.mdrRemoved')), ['Old step']);
+assert.deepEqual(await texts(flow.locator('.node.mdrChanged')), ['Valid request?']);
+const edgeStyles = await flow.locator('path.flowchart-link').evaluateAll((ps) => ps.map((p) => p.getAttribute('style') ?? ''));
+assert.equal(edgeStyles.filter((s) => /stroke-dasharray:\s*5 3/.test(s)).length, 2, 'removed edges (D→F, F→G) are dashed');
+assert.equal(edgeStyles.filter((s) => /stroke:\s*#1a7f37/.test(s)).length, 2, 'added edges (D→N, N→G) are green');
+assert.equal(await flow.locator('.mdr-mermaid-legend').count(), 1);
+await flow.scrollIntoViewIfNeeded();
+await page.screenshot({ path: `${shots}/11-mermaid-changes.png` });
+
+await switchView(flow, 'After');
+assert.equal(await flow.locator('svg').count(), 1);
+assert.equal(await flow.locator('.node.mdrRemoved').count(), 0, 'After has no removed nodes');
+let labels = await texts(flow.locator('.node'));
+assert.ok(labels.includes('Notify') && !labels.includes('Old step'), 'After shows the new version');
+await page.screenshot({ path: `${shots}/12-mermaid-after.png` });
+await switchView(flow, 'Before');
+labels = await texts(flow.locator('.node'));
+assert.ok(labels.includes('Old step') && !labels.includes('Notify'), 'Before shows the old version');
+await switchView(flow, 'Source');
+assert.equal(await flow.locator('svg').count(), 0);
+assert.match(await flow.locator('pre').innerText(), /flowchart TD[\s\S]*N\[Notify\]/, 'Source shows the code block again');
+await page.screenshot({ path: `${shots}/13-mermaid-source.png` });
+await switchView(flow, 'Changes');
+assert.equal(await flow.locator('.node.mdrRemoved').count(), 1);
+
+const pie = page.locator('.mdr-mermaid').nth(1);
+await pie.locator('svg').waitFor();
+assert.deepEqual(await pie.locator('.mdr-seg button').allInnerTexts(), ['After', 'Source'], 'an unchanged diagram has no Changes / Before');
+
+const seq = page.locator('.mdr-mermaid').nth(2);
+await seq.locator('.mdr-mermaid-pane svg').nth(1).waitFor({ timeout: 15000 });
+assert.deepEqual(await seq.locator('.mdr-seg button').allInnerTexts(), ['Changes', 'After', 'Before', 'Source']);
+assert.match(await seq.locator('.mdr-mermaid-note').innerText(), /before \/ after/);
+const panes = seq.locator('.mdr-mermaid-pane');
+assert.deepEqual(await texts(panes.locator('.mdr-mermaid-caption')), ['Before', 'After']);
+assert.ok((await texts(panes.nth(0).locator('.mdr-svg-removed'))).includes('approved'), 'removed message highlighted in Before');
+assert.equal(await panes.nth(0).locator('.mdr-svg-added').count(), 0);
+assert.ok((await texts(panes.nth(1).locator('.mdr-svg-added'))).includes('score intent'), 'added message highlighted in After');
+assert.equal(await panes.nth(1).locator('.mdr-svg-removed').count(), 0);
+await seq.scrollIntoViewIfNeeded();
+await page.screenshot({ path: `${shots}/14-mermaid-sequence.png` });
+await page.evaluate(() => { document.documentElement.dataset.colorMode = 'dark'; });
+await flow.scrollIntoViewIfNeeded();
+await flow.locator('.mdr-mermaid-loading').waitFor({ state: 'detached' });
+await flow.locator('svg').waitFor();
+await page.waitForTimeout(300);
+await page.screenshot({ path: `${shots}/15-mermaid-dark.png` });
+await page.evaluate(() => { document.documentElement.dataset.colorMode = 'light'; });
+
 assert.deepEqual(errors, [], 'no console errors');
-console.log('E2E OK –', calls.length, 'write calls recorded');
+console.log('E2E OK –', calls.length, 'write calls recorded, no console errors');
 await browser.close();

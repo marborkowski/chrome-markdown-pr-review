@@ -60,11 +60,24 @@ await opts.screenshot({ path: `${shots}/11-options-ghe.png`, fullPage: true });
 
 const page = await ctx.newPage();
 page.on('pageerror', (e) => errors.push(e.message));
+page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && errors.push(m.text()));
 await page.goto(`${origin}/acme/payments/pull/42/files`);
 await page.locator('.mdr-launcher').waitFor({ timeout: 10000 });
-assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*2/);
+assert.match(await page.locator('.mdr-launcher').innerText(), /Review Markdown\s*3/);
 await page.locator('.mdr-launcher').click();
 await page.locator('.mdr-doc h1').waitFor();
+
+// Mermaid: the content script import()s mermaid.js from the extension (web_accessible_resources).
+await page.locator('.mdr-file', { hasText: 'flow.md' }).click();
+await page.locator('.mdr-doc h1', { hasText: 'Checkout flow' }).waitFor();
+const flow = page.locator('.mdr-mermaid').first();
+await flow.locator('svg').waitFor({ timeout: 15000 });
+assert.equal(await flow.locator('.node.mdrAdded').count(), 1, 'merged Changes view of the flowchart rendered');
+await page.locator('.mdr-mermaid').nth(2).locator('.mdr-mermaid-pane svg').nth(1).waitFor({ timeout: 15000 });
+assert.equal(await page.locator('.mdr-banner-del').count(), 0, 'every diagram rendered');
+await page.screenshot({ path: `${shots}/13-ghe-mermaid.png` });
+await page.locator('.mdr-file', { hasText: 'architecture' }).click();
+await page.locator('.mdr-doc h1', { hasText: 'Payments service architecture' }).waitFor();
 
 // Comment now on a list item → goes through the service worker with the token.
 const pts = await page.evaluate(() => {
@@ -95,6 +108,6 @@ assert.equal(await page.locator('.mdr-badge-thread').count(), 1);
 await page.keyboard.press('Escape');
 await page.locator('.mdr-launcher').waitFor();
 
-assert.deepEqual(errors, []);
-console.log('EXTENSION E2E OK');
+assert.deepEqual(errors, [], 'no console errors');
+console.log('EXTENSION E2E OK – no console errors');
 await ctx.close();
