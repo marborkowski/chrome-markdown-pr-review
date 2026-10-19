@@ -1,6 +1,5 @@
 // Dev playground: runs the content-script UI against a mocked GitHub API.
 // Build with `npm run harness`, then open dev/harness.html via a local web server.
-import { setTransport } from '../src/content/api';
 import { mount } from '../src/content/index';
 import type { ApiRequest, ApiResponse } from '../src/shared/messages';
 import head from './fixtures/head.md';
@@ -10,6 +9,9 @@ import readmePatch from './fixtures/readme.patch';
 import legacyPatch from './fixtures/legacy.patch';
 import flow from './fixtures/flow-head.md';
 import flowPatch from './fixtures/flow.patch';
+import guide from './fixtures/guide-head.md';
+import guidePatch from './fixtures/guide.patch';
+import guideSinceReview from './fixtures/guide-since-review.patch';
 import { hardenSvg } from '../src/content/lib/svgHarden';
 
 declare global {
@@ -55,7 +57,17 @@ const files = [
   { filename: 'docs/legacy-export.md', status: 'removed', additions: 0, deletions: 3, changes: 3, sha: 'c', patch: legacyPatch },
   { filename: 'src/payments/adapter.ts', status: 'modified', additions: 40, deletions: 12, changes: 52, sha: 'd', patch: '@@ -1 +1 @@\n-a\n+b' },
   { filename: 'docs/flow.md', status: 'modified', additions: 5, deletions: 5, changes: 10, sha: 'e', patch: flowPatch },
+  { filename: 'docs/guide.md', status: 'modified', additions: 30, deletions: 14, changes: 44, sha: 'f', patch: guidePatch },
+  { filename: 'docs/img/flow.png', status: 'modified', additions: 0, deletions: 0, changes: 0, sha: 'g' },
 ];
+
+const commits = [
+  { sha: 'c1sha', commit: { message: 'Draft the operator guide', author: { name: 'Marek', date: new Date(now - 72 * 3600e3).toISOString() } }, author: { login: 'marek' } },
+  { sha: 'c2sha', commit: { message: 'Move setup below usage', author: { name: 'Marek', date: new Date(now - 30 * 3600e3).toISOString() } }, author: { login: 'marek' } },
+  { sha: 'headsha', commit: { message: 'Address review comments', author: { name: 'Marek', date: new Date(now - 2 * 3600e3).toISOString() } }, author: { login: 'marek' } },
+];
+const reviews = [{ id: 7, user: { login: 'you' }, state: 'COMMENTED', commit_id: 'c2sha', html_url: '#' }];
+const treePaths = ['README.md', 'docs', 'docs/architecture.md', 'docs/flow.md', 'docs/guide.md', 'docs/img', 'docs/img/flow.png', 'docs/img/logo.png', 'src', 'src/payments', 'src/payments/adapter.ts'];
 
 const viewed: Record<string, boolean> = { 'README.md': true };
 const resolved = new Set<number>();
@@ -92,16 +104,35 @@ async function mock(req: ApiRequest): Promise<ApiResponse> {
     return ok({ number: 42, title: 'Payments: async provider adapter + fraud scoring', node_id: 'PR_1', html_url: '#', head: { sha: 'headsha', ref: 'feature' }, base: { sha: 'basesha', ref: 'main' }, user: { login: 'marek' } });
   }
   if (path.endsWith('/pulls/42/files')) return ok(files);
+  if (path.endsWith('/pulls/42/commits')) return ok(commits);
+  if (path.endsWith('/pulls/42/reviews') && method === 'GET') return ok(reviews);
+  if (path === '/user') return ok({ login: 'you' });
+  if (path.includes('/git/trees/headsha')) return ok({ truncated: false, tree: treePaths.map((p) => ({ path: p, type: p.includes('.') ? 'blob' : 'tree' })) });
+  if (path.includes('/compare/c2sha...headsha')) {
+    return ok({ status: 'ahead', merge_base_commit: { sha: 'c2sha' }, files: [{ filename: 'docs/guide.md', status: 'modified', additions: 3, deletions: 2, changes: 5, sha: 'f', patch: guideSinceReview }] });
+  }
+  if (path.includes('/compare/')) return ok({ status: 'ahead', merge_base_commit: { sha: 'basesha' }, files: [] });
+  const editM = /\/pulls\/comments\/(\d+)$/.exec(path);
+  if (editM && method === 'PATCH') {
+    const c = comments.find((x) => x.id === Number(editM[1]));
+    c.body = (body as any).body;
+    return ok(c);
+  }
+  if (editM && method === 'DELETE') {
+    comments.splice(comments.findIndex((x) => x.id === Number(editM[1])), 1);
+    return { ok: true as const, status: 204, data: null };
+  }
   if (path.includes('/contents/')) {
     if (path.includes('architecture')) return ok(head);
     if (path.includes('README')) return ok(readme);
     if (path.includes('flow')) return ok(flow);
+    if (path.includes('guide')) return ok(guide);
     return { ok: false, status: 404, error: 'Not Found' };
   }
   if (path.endsWith('/pulls/42/comments') && method === 'GET') return ok(comments);
   if (path.endsWith('/pulls/42/comments') && method === 'POST') {
     const b = body as any;
-    const c = { id: nextId++, node_id: 'n', path: b.path, side: 'RIGHT', subject_type: b.subject_type ?? 'line', line: b.line ?? null, start_line: b.start_line ?? null, original_line: b.line, commit_id: b.commit_id, body: b.body, user: user('you', 210), created_at: new Date().toISOString(), html_url: '#' };
+    const c = { id: nextId++, node_id: 'n', path: b.path, side: b.side ?? 'RIGHT', subject_type: b.subject_type ?? 'line', line: b.line ?? null, start_line: b.start_line ?? null, original_line: b.line, commit_id: b.commit_id, body: b.body, user: user('you', 210), created_at: new Date().toISOString(), html_url: '#' };
     comments.push(c);
     return ok(c);
   }
@@ -115,13 +146,13 @@ async function mock(req: ApiRequest): Promise<ApiResponse> {
   if (path.endsWith('/pulls/42/reviews')) {
     const b = body as any;
     for (const x of b.comments) {
-      comments.push({ id: nextId++, node_id: 'n', path: x.path, side: 'RIGHT', subject_type: 'line', line: x.line, start_line: x.start_line ?? null, original_line: x.line, commit_id: b.commit_id, body: x.body, user: user('you', 210), created_at: new Date().toISOString(), html_url: '#' });
+      comments.push({ id: nextId++, node_id: 'n', path: x.path, side: x.side ?? 'RIGHT', subject_type: 'line', line: x.line, start_line: x.start_line ?? null, original_line: x.line, commit_id: b.commit_id, body: x.body, user: user('you', 210), created_at: new Date().toISOString(), html_url: '#' });
     }
     return ok({ id: 1 });
   }
   return { ok: false, status: 404, error: `mock: unhandled ${method} ${path}` };
 }
 
-setTransport(mock);
+window.__MDR_TRANSPORT__ = mock;
 window.__MDR_DEV_CTX__ = { origin: 'https://github.com', owner: 'acme', repo: 'payments', number: 42 };
 mount();

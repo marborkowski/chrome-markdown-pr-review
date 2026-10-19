@@ -21,31 +21,38 @@ const common = {
   loader: { '.css': 'text', '.md': 'text', '.patch': 'text' },
   define: { 'process.env.NODE_ENV': JSON.stringify(dev ? 'development' : 'production') },
   logLevel: 'info',
-  // src/content/lib/mermaid.ts import()s a runtime URL on purpose; esbuild can't bundle it and must not.
+  // The content script and the review import() runtime URLs on purpose; esbuild can't bundle them and must not.
   logOverride: { 'unsupported-dynamic-import': 'silent' },
 };
 
-// mermaid is not part of content.js (5 MB on every GitHub page): it is built as its own
-// ES module that the content script import()s on demand. Its inputs never change while
-// developing, so it is built once even in watch mode.
-const mermaidBuild = (outfile) => ({
-  entryPoints: ['src/mermaid/entry.ts'],
+// mermaid and KaTeX are not part of content.js (MBs on every GitHub page): each is built as its
+// own ES module that the content script import()s on demand. Their inputs never change while
+// developing, so they are built once even in watch mode.
+const lazyBuild = (entry, outfile) => ({
+  entryPoints: [entry],
   outfile,
   format: 'esm',
   minify: true,
   sourcemap: false,
   once: true,
 });
+const mermaidBuild = (outfile) => lazyBuild('src/mermaid/entry.ts', outfile);
+const katexBuild = (outfile) => lazyBuild('src/math/entry.ts', outfile);
+
+// The review UI is import()ed by the content script when a review is opened (ESM, rebuilt on change).
+const reviewBuild = (outfile) => ({ entryPoints: ['src/review/entry.tsx'], outfile, format: 'esm' });
 
 const builds = [
   { entryPoints: { background: 'src/background/index.ts' }, outdir },
-  { entryPoints: { content: 'src/content/index.tsx' }, outdir },
+  { entryPoints: { content: 'src/content/index.ts' }, outdir },
+  reviewBuild(`${outdir}/review.js`),
   { entryPoints: { options: 'src/options/main.tsx' }, outdir },
   mermaidBuild(`${outdir}/mermaid.js`),
+  katexBuild(`${outdir}/katex.js`),
 ];
 
 if (process.argv.includes('--harness')) {
-  builds.push({ entryPoints: { harness: 'dev/harness.tsx' }, outdir: 'dev/out' }, mermaidBuild('dev/out/mermaid.js'));
+  builds.push({ entryPoints: { harness: 'dev/harness.tsx' }, outdir: 'dev/out' }, reviewBuild('dev/out/review.js'), mermaidBuild('dev/out/mermaid.js'), katexBuild('dev/out/katex.js'));
 }
 
 for (const { once, ...b } of builds) {

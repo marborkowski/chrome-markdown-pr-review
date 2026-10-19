@@ -1,31 +1,56 @@
-import type { DiffInfo } from './patch';
+import type { DiffInfo, Removal } from './patch';
+
+export type Side = 'LEFT' | 'RIGHT';
 
 export type Anchor =
-  | { kind: 'line'; start: number; end: number; clamped: boolean }
-  | { kind: 'file'; start: number; end: number; reason: string };
+  | { kind: 'line'; side: Side; start: number; end: number; clamped: boolean }
+  | { kind: 'file'; side: Side; start: number; end: number; reason: string };
 
 /**
  * GitHub only accepts line comments on lines inside a diff hunk (and a multi-line
- * comment must stay inside one hunk). Map a selected head-file line range to the
- * best valid anchor, falling back to a file-level comment.
+ * comment must stay inside one hunk). Map a selected line range to the best valid
+ * anchor, falling back to a file-level comment. LEFT ranges are base-file lines
+ * (removed text), RIGHT ranges head-file lines.
  */
-export function resolveAnchor(diff: DiffInfo | null, start: number, end: number): Anchor {
+export function resolveAnchor(diff: DiffInfo | null, start: number, end: number, side: Side = 'RIGHT'): Anchor {
   if (end < start) [start, end] = [end, start];
   if (!diff || !diff.hasPatch) {
-    return { kind: 'file', start, end, reason: 'GitHub shows no diff for this file' };
+    return { kind: 'file', side, start, end, reason: 'GitHub shows no diff for this file' };
   }
   let best: { s: number; e: number } | null = null;
-  for (const h of diff.hunks) {
+  for (const h of side === 'LEFT' ? diff.oldHunks : diff.hunks) {
     const s = Math.max(start, h.start);
     const e = Math.min(end, h.end);
     if (s <= e && (!best || e - s > best.e - best.s)) best = { s, e };
   }
-  if (!best) return { kind: 'file', start, end, reason: 'the selected lines are outside the changed part of the file' };
-  return { kind: 'line', start: best.s, end: best.e, clamped: best.s !== start || best.e !== end };
+  if (!best) return { kind: 'file', side, start, end, reason: 'the selected lines are outside the changed part of the file' };
+  return { kind: 'line', side, start: best.s, end: best.e, clamped: best.s !== start || best.e !== end };
 }
 
-export function lineLabel(start: number, end: number) {
-  return start === end ? `line ${start}` : `lines ${start}–${end}`;
+/**
+ * The base-file lines of removed text a selection quotes: the removal near the block
+ * [sl, el] that contains the selected words, narrowed to the lines holding them.
+ */
+export function locateRemoved(removals: Removal[], sl: number, el: number, selected: string): { start: number; end: number } | null {
+  const target = norm(selected);
+  if (!target) return null;
+  const near = removals.filter((r) => {
+    const a = r.replacedBy ? r.replacedBy.start : r.anchor;
+    const b = r.replacedBy ? r.replacedBy.end : r.anchor;
+    return b >= sl - 1 && a <= el + 1;
+  });
+  for (const r of [...near, ...removals.filter((x) => !near.includes(x))]) {
+    if (!norm(plainify(r.lines.join('\n'))).includes(target.slice(0, Math.min(16, target.length)))) continue;
+    const { start, end } = narrowLines(r.lines, 1, r.lines.length, selected);
+    return { start: r.oldStart + start - 1, end: r.oldStart + end - 1 };
+  }
+  return null;
+}
+
+export function lineLabel(start: number, end: number, side: Side = 'RIGHT') {
+  if (!start) return 'whole file';
+  const l = start === end ? `line ${start}` : `lines ${start}–${end}`;
+  return side === 'LEFT' ? `${l} (before)` : l;
 }
 
 // ---------------------------------------------------------------------------

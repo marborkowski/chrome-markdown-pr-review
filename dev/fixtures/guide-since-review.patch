@@ -1,0 +1,23 @@
+@@ -25,7 +25,7 @@ The command exits non-zero when any adapter is degraded, so it is safe to use in
+ | Provider | Timeout | Retries |
+ |---|---|---|
+ | Adyen | 2 s | 3 |
+-| Stripe | 4 s | 2 |
++| Stripe | 5 s | 2 |
+ | Checkout.com | 3 s | 2 |
+ 
+ Retries use exponential backoff with jitter, capped at the provider timeout.
+@@ -57,7 +57,7 @@ When an adapter is degraded for more than five minutes, page the on-call enginee
+ and post in the incident channel. Do not restart the adapter yourself. See the
+ [runbook](runbooks/adapter.md) and the [escalation policy](#escalation).
+ 
+-Keep a timeline of what you did and when; it is the most useful input for the review.
++Keep a timeline of what you did and when; it is the most useful input for the review.[^1]
+ 
+ <details>
+ <summary>Who is on call?</summary>
+@@ -88,3 +88,4 @@ The migration took three months and was done without downtime.
+ 
+ Contact the platform team in #payments-platform for access requests.
+ 
++[^1]: Timelines are kept in the incident document.

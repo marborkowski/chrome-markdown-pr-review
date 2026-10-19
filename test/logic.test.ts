@@ -191,13 +191,13 @@ describe('review submission', () => {
 describe('blockDiffSource', () => {
   const lines = ['- item one', '  continues here', '- item two'];
   it('swaps changed lines back and keeps the unchanged ones on both sides', () => {
-    const r = blockDiffSource(lines, [{ anchor: 2, lines: ['  continued there'], replacedBy: { start: 2, end: 2 } }], 1, 2);
+    const r = blockDiffSource(lines, [{ anchor: 2, oldStart: 2, lines: ['  continued there'], replacedBy: { start: 2, end: 2 } }], 1, 2);
     expect(r.oldText).toBe('- item one\n  continued there');
     expect(r.newText).toBe('- item one\n  continues here');
     expect([...r.used]).toEqual([0]);
   });
   it('puts lines removed inside the block back in the old version', () => {
-    const r = blockDiffSource(lines, [{ anchor: 2, lines: ['  gone'] }], 1, 2);
+    const r = blockDiffSource(lines, [{ anchor: 2, oldStart: 2, lines: ['  gone'] }], 1, 2);
     expect(r.oldText).toBe('- item one\n  gone\n  continues here');
     expect(r.newText).toBe('- item one\n  continues here');
   });

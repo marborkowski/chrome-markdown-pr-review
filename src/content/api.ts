@@ -1,5 +1,5 @@
 import type { ApiRequest, ApiResponse } from '../shared/messages';
-import type { PendingComment, PrContext, PrFile, PullRequest, ReviewComment, ThreadState } from './types';
+import type { Commit, Compare, PendingComment, PrContext, PrFile, PullRequest, Review, ReviewComment, ThreadState } from './types';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public needsToken = false) {
@@ -7,9 +7,9 @@ export class ApiError extends Error {
   }
 }
 
-type Transport = (req: ApiRequest) => Promise<ApiResponse>;
+export type Transport = (req: ApiRequest) => Promise<ApiResponse>;
 
-let transport: Transport = async (req) => {
+const chromeTransport: Transport = async (req) => {
   try {
     const res = (await chrome.runtime.sendMessage(req)) as ApiResponse | undefined;
     if (!res) return { ok: false, status: 0, error: 'No response from the extension background worker.' };
@@ -23,12 +23,15 @@ let transport: Transport = async (req) => {
   }
 };
 
-/** Used by the dev harness to plug in a mock backend. */
-export function setTransport(t: Transport) {
-  transport = t;
+declare global {
+  interface Window {
+    /** The dev harness plugs a mock backend in here (read by both the content script and review.js). */
+    __MDR_TRANSPORT__?: Transport;
+  }
 }
 
 async function call<T = any>(ctx: Pick<PrContext, 'origin'>, req: Omit<ApiRequest, 'type' | 'origin'>): Promise<T> {
+  const transport = window.__MDR_TRANSPORT__ ?? chromeTransport;
   const res = await transport({ type: 'api', origin: ctx.origin, ...req });
   if (!res.ok) throw new ApiError(res.status, res.error, res.needsToken);
   return res.data as T;
@@ -42,7 +45,15 @@ export interface LineCommentInput {
   body: string;
   line: number;
   start_line?: number;
+  /** LEFT comments are on removed text; lines are base-file lines. */
+  side?: 'LEFT' | 'RIGHT';
 }
+
+/** The line fields of a review comment. */
+const lineFields = (x: LineCommentInput) => {
+  const side = x.side ?? 'RIGHT';
+  return { line: x.line, side, ...(x.start_line && x.start_line < x.line ? { start_line: x.start_line, start_side: side } : {}) };
+};
 
 export const gh = {
   pr: (c: PrContext) => call<PullRequest>(c, { path: `${repoPath(c)}/pulls/${c.number}` }),
@@ -55,19 +66,32 @@ export const gh = {
   comments: (c: PrContext) =>
     call<ReviewComment[]>(c, { path: `${repoPath(c)}/pulls/${c.number}/comments`, paginate: true }),
 
+  commits: (c: PrContext) => call<Commit[]>(c, { path: `${repoPath(c)}/pulls/${c.number}/commits`, paginate: true }),
+
+  reviews: (c: PrContext) => call<Review[]>(c, { path: `${repoPath(c)}/pulls/${c.number}/reviews`, paginate: true }),
+
+  /** The signed-in user (needs a token). */
+  viewer: (c: PrContext) => call<{ login: string }>(c, { path: '/user' }),
+
+  /** Files changed between two commits (three-dot: from their merge base), with patches. */
+  compare: (c: PrContext, base: string, head: string) =>
+    call<Compare>(c, { path: `${repoPath(c)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}` }),
+
+  /** Every path (files and folders) of a commit; `truncated` for huge repositories. */
+  tree: (c: PrContext, sha: string) =>
+    call<{ tree: { path: string; type: string }[]; truncated: boolean }>(c, { path: `${repoPath(c)}/git/trees/${encodeURIComponent(sha)}?recursive=1` }),
+
   createLineComment: (c: PrContext, commitId: string, x: LineCommentInput) =>
     call<ReviewComment>(c, {
       method: 'POST',
       path: `${repoPath(c)}/pulls/${c.number}/comments`,
-      body: {
-        body: x.body,
-        commit_id: commitId,
-        path: x.path,
-        line: x.line,
-        side: 'RIGHT',
-        ...(x.start_line && x.start_line < x.line ? { start_line: x.start_line, start_side: 'RIGHT' } : {}),
-      },
+      body: { body: x.body, commit_id: commitId, path: x.path, ...lineFields(x) },
     }),
+
+  editComment: (c: PrContext, id: number, body: string) =>
+    call<ReviewComment>(c, { method: 'PATCH', path: `${repoPath(c)}/pulls/comments/${id}`, body: { body } }),
+
+  deleteComment: (c: PrContext, id: number) => call(c, { method: 'DELETE', path: `${repoPath(c)}/pulls/comments/${id}` }),
 
   /** File-level comment; falls back to a regular PR conversation comment on older GHE servers. */
   createFileComment: async (c: PrContext, commitId: string, path: string, body: string) => {
@@ -108,13 +132,7 @@ export const gh = {
         commit_id: commitId,
         event,
         ...(body ? { body } : {}),
-        comments: comments.map((x) => ({
-          path: x.path,
-          body: x.body,
-          line: x.line,
-          side: 'RIGHT',
-          ...(x.start_line && x.start_line < x.line ? { start_line: x.start_line, start_side: 'RIGHT' } : {}),
-        })),
+        comments: comments.map((x) => ({ path: x.path, body: x.body, ...lineFields(x) })),
       },
     }),
 

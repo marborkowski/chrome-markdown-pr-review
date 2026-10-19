@@ -12,8 +12,9 @@ const files = [
   { filename: 'README.md', status: 'added', additions: 14, deletions: 0, changes: 14, sha: 'b', patch: fx('readme.patch') },
   { filename: 'app.ts', status: 'modified', additions: 1, deletions: 1, changes: 2, sha: 'c', patch: '@@ -1 +1 @@\n-a\n+b' },
   { filename: 'docs/flow.md', status: 'modified', additions: 5, deletions: 5, changes: 10, sha: 'd', patch: fx('flow.patch') },
+  { filename: 'docs/guide.md', status: 'modified', additions: 30, deletions: 14, changes: 44, sha: 'e', patch: fx('guide.patch') },
 ];
-const contents = { architecture: head, README: fx('readme-head.md'), flow: fx('flow-head.md') };
+const contents = { architecture: head, README: fx('readme-head.md'), flow: fx('flow-head.md'), guide: fx('guide-head.md') };
 
 const page = `<!doctype html><html><head><meta charset="utf-8"><title>PR #42 · acme/payments</title></head>
 <body style="font-family:sans-serif"><header style="height:60px;background:#24292f;color:#fff;padding:18px">GitHub Enterprise (mock)</header>

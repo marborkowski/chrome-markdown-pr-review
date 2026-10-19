@@ -62,7 +62,7 @@ const indentOf = (l: string) => unquote(l).search(/\S/);
 const SIMILAR = 0.3;
 const WORD = /[\p{L}\p{N}_]+/gu;
 
-function wordCounts(lines: string[]) {
+export function wordCounts(lines: string[]) {
   const counts = new Map<string, number>();
   for (const l of lines) {
     for (const w of unquote(l).replace(LIST_MARKER, '').toLowerCase().match(WORD) ?? []) counts.set(w, (counts.get(w) ?? 0) + 1);
@@ -71,7 +71,7 @@ function wordCounts(lines: string[]) {
 }
 
 /** Dice coefficient of two word multisets. */
-function similarity(a: Map<string, number>, b: Map<string, number>) {
+export function similarity(a: Map<string, number>, b: Map<string, number>) {
   let common = 0;
   let total = 0;
   for (const [w, n] of a) {
@@ -182,12 +182,29 @@ const DEL_END = '⸪';
 const SENTINELS = /([⸛⸞⸟⸪])/;
 const SENTINELS_ALL = /[⸛⸞⸟⸪]/g;
 
-/** Words, whitespace and punctuation, but code spans and links are kept whole so the diff never splits their syntax. */
-const MD_TOKEN = /`+[^`\n]+?`+|!?\[[^\]\n]*\](?:\([^)\n]*\)|\[[^\]\n]*\])|<https?:[^>\s]+>|[\p{L}\p{M}\p{N}_]+|\s+|[^\s]/gu;
+/**
+ * Words, whitespace and punctuation; code spans, links, HTML tags and inline math are kept whole
+ * so the diff never splits their syntax.
+ */
+const MD_TOKEN = /`+[^`\n]+?`+|!?\[[^\]\n]*\](?:\([^)\n]*\)|\[[^\]\n]*\])|<https?:[^>\s]+>|<\/?[A-Za-z][^<>\n]*>|\$[^$\n]+\$|[\p{L}\p{M}\p{N}_]+|\s+|[^\s]/gu;
+/** Scripts written without spaces between words: a whole sentence would otherwise be one "word". */
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+let segmenter: Intl.Segmenter | null | undefined;
+
+/** Splits a run of letters into words with the browser's dictionary-based segmenter (one character at a time without it). */
+export function splitWords(run: string): string[] {
+  if (!UNSPACED.test(run)) return [run];
+  if (segmenter === undefined) segmenter = typeof Intl !== 'undefined' && 'Segmenter' in Intl ? new Intl.Segmenter(undefined, { granularity: 'word' }) : null;
+  return segmenter ? [...segmenter.segment(run)].map((s) => s.segment) : [...run];
+}
+
+export function tokenizeMarkdown(value: string): string[] {
+  return (value.match(MD_TOKEN) ?? []).flatMap((t) => (/^[\p{L}\p{M}\p{N}_]+$/u.test(t) ? splitWords(t) : [t]));
+}
 
 class MarkdownTokenDiff extends Diff<string, string> {
   tokenize(value: string) {
-    return value.match(MD_TOKEN) ?? [];
+    return tokenizeMarkdown(value);
   }
 }
 const tokenDiff = new MarkdownTokenDiff();
@@ -203,6 +220,10 @@ export function markdownDiffSource(oldText: string, newText: string): string {
     .join('');
 }
 
+/** Elements with no text of their own (an image, a line break), or whose text is source (math), that sit inside a changed region as a whole. */
+const ATOMIC = new Set(['img', 'br', 'input', 'picture', 'svg']);
+const atomic = (n: { tagName: string; properties: Record<string, unknown> }) => ATOMIC.has(n.tagName) || (n.tagName === 'code' && n.properties.dataMath !== undefined);
+
 /** rehype plugin: keep paragraphs apart once unwrapped, and turn sentinel regions into <ins>/<del>. */
 export function rehypeDiffMarks() {
   return (tree: Root) => {
@@ -210,21 +231,22 @@ export function rehypeDiffMarks() {
     tree.children = blocks.flatMap((n, i) => (i ? [{ type: 'text' as const, value: '\n\n' }, n] : [n]));
 
     let state: 'ins' | 'del' | null = null;
-    visit(tree, 'text', (node, index, parent) => {
+    const mark = (child: ElementContent): ElementContent =>
+      ({ type: 'element', tagName: state!, properties: { className: [`mdr-d-${state}`] }, children: [child] }) as ElementContent;
+    visit(tree, (node, index, parent) => {
       if (!parent || index === undefined) return;
+      if (node.type === 'element' && state && atomic(node)) {
+        parent.children.splice(index, 1, mark(node) as any);
+        return [SKIP, index + 1];
+      }
+      if (node.type !== 'text') return;
       if (!state && !SENTINELS.test(node.value)) return;
       const out: ElementContent[] = [];
       for (const s of node.value.split(SENTINELS)) {
         if (s === INS_START) state = 'ins';
         else if (s === DEL_START) state = 'del';
         else if (s === INS_END || s === DEL_END) state = null;
-        else if (s) {
-          out.push(
-            state
-              ? { type: 'element', tagName: state, properties: { className: [`mdr-d-${state}`] }, children: [{ type: 'text', value: s }] }
-              : { type: 'text', value: s },
-          );
-        }
+        else if (s) out.push(state ? mark({ type: 'text', value: s }) : { type: 'text', value: s });
       }
       parent.children.splice(index, 1, ...(out as any[]));
       return [SKIP, index + out.length];

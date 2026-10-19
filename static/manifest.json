@@ -34,7 +34,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["mermaid.js"],
+      "resources": ["review.js", "mermaid.js", "katex.js"],
       "matches": ["https://*/*", "http://*/*"]
     }
   ],
