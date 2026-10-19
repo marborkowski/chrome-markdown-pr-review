@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-color-mode="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MD Review harness</title>
+    <style>
+      body { margin: 0; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2328; background: #fff; }
+      .gh-head { height: 64px; background: #f6f8fa; border-bottom: 1px solid #d1d9e0; display: flex; align-items: center; padding: 0 24px; gap: 12px; }
+      .gh-body { max-width: 1012px; margin: 24px auto; padding: 0 16px; }
+      .gh-title { font-size: 28px; font-weight: 400; margin: 0 0 8px; }
+      .gh-tabs { display: flex; gap: 16px; border-bottom: 1px solid #d1d9e0; margin: 16px 0; padding-bottom: 8px; color: #59636e; }
+      .gh-box { border: 1px solid #d1d9e0; border-radius: 6px; height: 360px; background: #f6f8fa; }
+    </style>
+    <script>window.__MDR_HARNESS__ = true; if (location.hash === '#dark') document.documentElement.dataset.colorMode = 'dark';</script>
+  </head>
+  <body>
+    <div class="gh-head"><b>acme / payments</b></div>
+    <div class="gh-body">
+      <h1 class="gh-title">Payments: async provider adapter + fraud scoring <span style="color:#59636e">#42</span></h1>
+      <div class="gh-tabs"><span>Conversation</span><span>Commits</span><b>Files changed</b></div>
+      <div class="gh-box"></div>
+    </div>
+    <script src="out/harness.js"></script>
+  </body>
+</html>

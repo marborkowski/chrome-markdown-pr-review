@@ -1,0 +1,49 @@
+---
+title: Payments service – architecture
+owner: platform-team
+status: draft
+---
+
+# Payments service architecture
+
+This document describes how the payments service processes card and wallet transactions
+and how it integrates with the ledger and the fraud-scoring service.
+
+## Goals
+
+- Process card payments with p99 latency below 250 ms.
+- Keep the ledger as the single source of truth.
+- Support retries without double charging, using idempotency keys supplied by clients.
+- Make every state transition observable through domain events.
+
+## Request flow
+
+1. The API gateway validates the request and attaches the idempotency key.
+2. The payments service creates a `PaymentIntent`.
+3. The fraud service scores the intent; high-risk intents are held for review.
+4. The provider adapter calls the card network.
+
+The adapter is **asynchronous**: it publishes a `ProviderRequested` event and the
+response is correlated by the webhook handler.
+
+```mermaid
+sequenceDiagram
+  Gateway->>Payments: POST /payments
+  Payments->>Fraud: score(intent)
+  Payments->>Adapter: ProviderRequested
+```
+
+## Storage
+
+We use PostgreSQL with a single primary and two read replicas for reporting queries.
+
+| Table | Purpose | Retention |
+|-------|---------|-----------|
+| payment_intents | Lifecycle of a payment | 7 years |
+| provider_events | Raw webhook payloads | 30 days |
+| outbox | Events waiting to be published | 7 days |
+
+## Open questions
+
+- Should refunds go through the same adapter?
+- Who owns the fraud thresholds – risk or payments?
