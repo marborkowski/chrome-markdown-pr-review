@@ -4,6 +4,7 @@ import { narrowLines, resolveAnchor } from '../lib/anchor';
 import { contentFromRemovedPatch, parsePatch, type DiffInfo } from '../lib/patch';
 import { prKey, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread } from '../types';
 import { Composer, type ComposerTarget } from './Composer';
+import { ErrorBoundary } from './ErrorBoundary';
 import { makeUrlResolver, MarkdownDoc } from './MarkdownDoc';
 import { SourceDoc } from './SourceDoc';
 import { SubmitReview, type ReviewEvent } from './SubmitReview';
@@ -498,17 +499,27 @@ export function Review({ ctx, pr, files, onClose, onReload }: Props) {
             {file && text !== undefined && (
               <article ref={docRef} className={`markdown-body mdr-doc mdr-mode-${mode}`} onMouseUp={onMouseUp}>
                 {mode === 'rendered' ? (
-                  <MarkdownDoc
-                    source={text}
-                    diff={shownDiff}
-                    threadLines={threadLines}
-                    pendingLines={pendingLines}
-                    activeRange={activeRange}
-                    inlineDiff={inline}
-                    resolveUrl={resolveUrl}
-                    onBadge={onBadge}
-                    onMods={onMods}
-                  />
+                  <ErrorBoundary
+                    key={file.filename}
+                    fallback={(e) => (
+                      <div className="mdr-banner mdr-banner-del">
+                        Couldn't render this file: {e.message}{' '}
+                        <button className="mdr-link" onClick={() => setMode('source')}>Show source</button>
+                      </div>
+                    )}
+                  >
+                    <MarkdownDoc
+                      source={text}
+                      diff={shownDiff}
+                      threadLines={threadLines}
+                      pendingLines={pendingLines}
+                      activeRange={activeRange}
+                      inlineDiff={inline}
+                      resolveUrl={resolveUrl}
+                      onBadge={onBadge}
+                      onMods={onMods}
+                    />
+                  </ErrorBoundary>
                 ) : (
                   <SourceDoc source={text} diff={shownDiff} threadLines={threadLines} pendingLines={pendingLines} activeRange={activeRange} onBadge={onBadge} />
                 )}

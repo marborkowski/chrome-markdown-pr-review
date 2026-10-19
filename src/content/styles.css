@@ -184,6 +184,8 @@ kbd {
 .mdr-doc ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 
 .mdr-doc [data-block] { position: relative; }
+.mdr-doc .mdr-void { position: relative; }
+.mdr-doc hr[data-block] { overflow: visible; } /* let the change marker show */
 .mdr-doc .mdr-frontmatter { font-size: 12px; opacity: 0.85; }
 
 /* changed blocks */

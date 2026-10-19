@@ -44,6 +44,9 @@ export function cleanForInline(tag: string, text: string): string {
   return out.join('\n').replace(/\n{2,}/g, '\n\n').trim();
 }
 
+/** Block tags that can't have children (React throws): their gutter hangs beside them instead. */
+const VOID_TAGS = new Set(['hr']);
+
 const idxList = (v: unknown): number[] =>
   v === undefined || v === null || v === '' ? [] : String(v).split(' ').map(Number);
 
@@ -134,11 +137,12 @@ function makeBlock(Tag: string) {
         const oldText = cleanForInline(Tag, rs.flatMap((r) => r.lines).join('\n'));
         const newText = cleanForInline(Tag, ctx.lines.slice(start - 1, end).join('\n'));
         const rest = mods.filter((i) => !repl.includes(i));
+        const Wrap = VOID_TAGS.has(Tag) ? 'div' : El; // the word diff needs an element that can hold it
         return (
-          <El {...props} data-sl={Math.min(sl, start)} data-el={Math.max(el, end)} className={`${props.className ?? ''} mdr-inline`}>
+          <Wrap {...props} data-sl={Math.min(sl, start)} data-el={Math.max(el, end)} className={`${props.className ?? ''} mdr-inline`}>
             <WordDiff oldText={oldText} newText={newText} />
             <Gutter threads={threads} pending={pending} mods={rest} sl={sl} el={el} />
-          </El>
+          </Wrap>
         );
       }
     }
@@ -153,6 +157,14 @@ function makeBlock(Tag: string) {
         kids[i] = cloneElement(last, { style: { ...(last.props.style ?? {}), position: 'relative' } }, last.props.children, gutter);
       }
       return <El {...props}>{kids}</El>;
+    }
+    if (VOID_TAGS.has(Tag)) {
+      return (
+        <div className="mdr-void">
+          <El {...props} />
+          {gutter}
+        </div>
+      );
     }
     return (
       <El {...props}>
