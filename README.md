@@ -65,7 +65,7 @@ It is built around what makes reviewing prose in pull requests painful: GitHub's
 
 - **Changes since your last review.** The header's **All changes ▾** menu shows the changes since *your last review* or since any commit of the PR, instead of everything the PR changes; files without new changes are dimmed in the file list. After a force-push the changes are computed file by file.
 - **Changes only.** *View → Changes only* (`f`) folds the unchanged parts of a long document into *⋯ N unchanged blocks* placeholders; headings stay as signposts.
-- **Deleted, new and renamed files.** A file the PR deletes is still shown – its last version from the base commit – under a *deleted* banner (comments go on its removed lines). A brand-new file gets a *New file* banner and no change highlighting (everything would be green, so `n` / `p` have nothing to jump to). Renamed files show *old → new* in the file bar, and the file list marks files **A** / **D** / **R**. Files too large for GitHub to diff get their changes computed locally.
+- **Deleted, new and renamed files.** A file the PR deletes is still shown – its last version from the base commit – under a *deleted* banner (comments go on its removed lines). A brand-new file gets a *New file* banner and no change highlighting (everything would be green, so `n` / `p` have nothing to jump to). Renamed files show *old → new* in the file bar, and the file list marks files **A** / **D** / **R**. Files too large for GitHub to diff get their changes computed locally (the extension gives up after two seconds on two very different long files and says so, rather than freezing the tab).
 
 ### Review
 
