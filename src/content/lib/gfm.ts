@@ -58,7 +58,7 @@ export function rehypeCallouts() {
   return (tree: HastRoot) => {
     visit(tree, 'element', (node: Element) => {
       const kind = node.properties.dataCallout;
-      if (typeof kind !== 'string' || !ALERTS[kind]) return;
+      if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(ALERTS, kind)) return;
       const custom = node.properties.dataCalloutTitle;
       delete node.properties.dataCallout;
       delete node.properties.dataCalloutTitle;

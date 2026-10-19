@@ -2,7 +2,7 @@ import type { Element, ElementContent, Root, Parent } from 'hast';
 import { visit } from 'unist-util-visit';
 import { similarity, splitRemoved, wordCounts } from './inlineDiff';
 import type { DiffInfo, Removal } from './patch';
-import { isDelimiterRow, isTableLine, pairRows, sameRow } from './tables';
+import { isDelimiterRow, isTableLine, pairRows, sameRow, splitRow } from './tables';
 
 /** Elements that represent a block of source lines and can own changes, threads and comments. */
 export const BLOCK_TAGS = [
@@ -144,15 +144,21 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
 
       /** Rows to insert into tables (removed rows), and removed blocks to insert before the block that follows them. */
       const rowInserts: { parent: Parent; node: Element; ref: Element; after: boolean }[] = [];
-      const tableRows = (r: Removal) => {
+      /**
+       * The removed lines as rows of a table with `cols` columns, or null when they aren't rows:
+       * every line must look like one (a leading or trailing pipe, or exactly the table's cell
+       * count – prose with a `|` in it doesn't count), with no blank line among them.
+       */
+      const tableRows = (r: Removal, cols: number) => {
         const rows = r.lines.map((l, k) => [l, k] as const).filter(([l]) => l.trim());
-        return rows.length > 0 && rows.every(([l]) => isTableLine(l)) ? rows.filter(([l]) => !isDelimiterRow(l)) : null;
+        if (!rows.length || rows[rows.length - 1][1] - rows[0][1] + 1 !== rows.length) return null;
+        const isRow = (l: string) => isTableLine(l) && (/^\s*\|/.test(l) || /\|\s*$/.test(l) || splitRow(l).length === cols);
+        return rows.every(([l]) => isRow(l)) ? rows.filter(([l]) => !isDelimiterRow(l)) : null;
       };
+      const colsOf = (b: BlockRec) => splitRow(opts.lines[b.sl - 1] ?? '').length;
 
       /** A replacement made only of table rows: pair old and new rows, so edited rows get a cell diff and removed rows stay in the table. */
       const replaceRows = (r: Removal, i: number): boolean => {
-        const old = tableRows(r);
-        if (!old) return false;
         const rows: BlockRec[] = [];
         for (let l = r.replacedBy!.start; l <= r.replacedBy!.end; l++) {
           if (isBlank(l)) continue;
@@ -163,6 +169,8 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
           if (!rows.includes(o)) rows.push(o);
         }
         if (!rows.length) return false;
+        const old = tableRows(r, colsOf(rows[0]));
+        if (!old) return false;
         const pairs = pairRows(old.map(([l]) => l), rows.map((b) => opts.lines[b.sl - 1] ?? ''));
         appendIdx(rows[0].node, 'dataMods', i);
         rows.forEach((b, j) => {
@@ -202,16 +210,17 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
       diff.removals.forEach((r, i) => {
         if (r.replacedBy && replaceRows(r, i)) return;
         if (!r.replacedBy) {
-          // Rows deleted from a table stay in it, struck out.
-          const rows = tableRows(r);
-          if (rows) {
-            const next = ownerOf(r.anchor);
-            const prev = ownerOf(r.anchor - 1);
-            const ref = next?.node.tagName === 'tr' ? next : prev?.node.tagName === 'tr' ? prev : null;
-            if (ref) {
-              rows.forEach(([, k]) => rowInserts.push({ parent: ref.parent, node: removedRow(i, k, r.oldStart + k), ref: ref.node, after: ref !== next }));
-              return;
-            }
+          // Rows deleted from inside or from the end of a table stay in it, struck out. Lines deleted
+          // right before a table weren't part of it (they'd land above its header).
+          const next = ownerOf(r.anchor);
+          const prev = ownerOf(r.anchor - 1);
+          const afterRow = prev?.node.tagName === 'tr';
+          const afterHeader = prev?.node.tagName === 'table' && isDelimiterRow(opts.lines[r.anchor - 2] ?? '') && next?.node.tagName === 'tr';
+          const ref = afterRow ? prev : afterHeader ? next : null;
+          const rows = ref ? tableRows(r, colsOf(ref)) : null;
+          if (ref && rows) {
+            rows.forEach(([, k]) => rowInserts.push({ parent: ref.parent, node: removedRow(i, k, r.oldStart + k), ref: ref.node, after: afterRow }));
+            return;
           }
         }
         if (r.replacedBy) {

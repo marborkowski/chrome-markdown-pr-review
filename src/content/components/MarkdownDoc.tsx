@@ -320,7 +320,8 @@ function Gutter({ threads, pending, mods, sl, el, movedFrom }: { threads: number
           className="mdr-badge mdr-badge-moved"
           title="Moved here unchanged – show where it was"
           onClick={(e) => {
-            const src = e.currentTarget.closest('.mdr-doc')?.querySelector(`[data-removal="${movedFrom}"]`);
+            // A moved section's pieces may be shown as one block (data-removal-more lists the others).
+            const src = e.currentTarget.closest('.mdr-doc')?.querySelector(`[data-removal="${movedFrom}"], [data-removal-more~="${movedFrom}"]`);
             if (src) reveal(src);
           }}
         >
@@ -413,7 +414,7 @@ function RemovedBlock({ idx, more = [] }: { idx: number; more?: number[] }) {
   );
   if (!deleted) {
     return (
-      <div className="mdr-removed mdr-removed-moved" data-removal={idx} data-osl={r.oldStart} data-oel={oldEnd}>
+      <div className="mdr-removed mdr-removed-moved" data-removal={idx} data-removal-more={more.length ? more.join(' ') : undefined} data-osl={r.oldStart} data-oel={oldEnd}>
         <div className="mdr-removed-head">
           <span className="mdr-chev">⇅</span> {nonBlank} line{nonBlank === 1 ? '' : 's'} {movedLinks}
         </div>
@@ -421,7 +422,7 @@ function RemovedBlock({ idx, more = [] }: { idx: number; more?: number[] }) {
     );
   }
   return (
-    <div className="mdr-removed" data-removal={idx} data-osl={r.oldStart} data-oel={oldEnd}>
+    <div className="mdr-removed" data-removal={idx} data-removal-more={more.length ? more.join(' ') : undefined} data-osl={r.oldStart} data-oel={oldEnd}>
       <div className="mdr-removed-head">
         <button className="mdr-removed-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
           <span className="mdr-chev">{open ? '▾' : '▸'}</span> Removed {deleted} line{deleted === 1 ? '' : 's'}

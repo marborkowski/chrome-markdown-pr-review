@@ -4,15 +4,30 @@ import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
 import remarkGemoji from 'remark-gemoji';
+import remarkMath from 'remark-math';
 import { visit } from 'unist-util-visit';
 import { slugger } from './gfm';
+import { remarkMathGuard } from './math';
 import type { DiffInfo } from './patch';
 
 /** Parses Markdown the way the document view does (without the HTML step), for outline and checks. */
-const parser = unified().use(remarkParse).use(remarkGfm).use(remarkFrontmatter, ['yaml', 'toml']).use(remarkGemoji);
+const parser = unified().use(remarkParse).use(remarkGfm).use(remarkFrontmatter, ['yaml', 'toml']).use(remarkMath, { singleDollarTextMath: true }).use(remarkMathGuard).use(remarkGemoji);
 
 export function parseMarkdown(source: string): Root {
-  return parser.runSync(parser.parse(source)) as Root;
+  return parser.runSync(parser.parse(source), source) as Root;
+}
+
+/** Nodes whose source is reproduced as written: spacing inside them is never "just whitespace". */
+const VERBATIM = new Set(['code', 'html', 'yaml', 'toml', 'math', 'esm']);
+
+/** The lines of a document inside code blocks, HTML, front matter and display math. */
+export function verbatimLines(tree: Root): Set<number> {
+  const out = new Set<number>();
+  visit(tree, (n: Nodes) => {
+    if (!VERBATIM.has(n.type) || !n.position) return;
+    for (let l = n.position.start.line; l <= n.position.end.line; l++) out.add(l);
+  });
+  return out;
 }
 
 export const mdText = (n: Nodes): string =>

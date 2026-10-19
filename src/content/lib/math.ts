@@ -1,6 +1,9 @@
 import type { Element, Root as HastRoot } from 'hast';
-import type { InlineCode, Parent, Root as MdastRoot, Text } from 'mdast';
-import type { Position } from 'unist';
+import type { InlineCode, Parent, PhrasingContent, Root as MdastRoot, Text } from 'mdast';
+import type { Point, Position } from 'unist';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
 
 /** remark-math's inline node (its mdast types live in a transitive package). */
 interface InlineMath {
@@ -8,6 +11,31 @@ interface InlineMath {
   value: string;
   position?: Position;
   data?: unknown;
+}
+
+/** Parses the text between two dollars that turned out not to be math, so the Markdown in it still renders. */
+const fragmentParser = unified().use(remarkParse).use(remarkGfm);
+
+function shifted(pos: Position | undefined, start: Point): Position | undefined {
+  if (!pos) return undefined;
+  const move = (p: Point): Point => ({
+    line: start.line + p.line - 1,
+    column: p.line === 1 ? start.column + p.column - 1 : p.column,
+    offset: (start.offset ?? 0) + (p.offset ?? 0),
+  });
+  return { start: move(pos.start), end: move(pos.end) };
+}
+
+function inlineFragment(raw: string, position: Position | undefined): PhrasingContent[] {
+  const root = fragmentParser.parse(raw) as MdastRoot;
+  const p = root.children[0];
+  if (!position || root.children.length !== 1 || p.type !== 'paragraph') return [{ type: 'text', value: raw, position } as Text];
+  const walk = (n: any) => {
+    n.position = shifted(n.position, position.start);
+    n.children?.forEach(walk);
+  };
+  p.children.forEach(walk);
+  return p.children;
 }
 
 /** An inline math node the way remark-math builds it (to-hast reads `data`, not `value`). */
@@ -47,7 +75,9 @@ export function remarkMathGuard() {
       if (fence === 1 && /^`[^`]+`$/.test(inner)) {
         parent.children[index] = inlineMath(inner.slice(1, -1), node.position) as any; // GitHub's $`…`$ form
       } else if (fence === 1 && (/^\s|\s$/.test(inner) || /\d/.test(src[e] ?? ''))) {
-        parent.children[index] = { type: 'text', value: raw, position: node.position } as Text;
+        const nodes = inlineFragment(raw, node.position);
+        parent.children.splice(index, 1, ...(nodes as any[]));
+        return index + nodes.length;
       }
     });
     visit(tree, (node) => {

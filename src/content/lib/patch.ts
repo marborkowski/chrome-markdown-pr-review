@@ -122,7 +122,9 @@ export function parsePatch(patch: string | undefined | null): DiffInfo {
           i++;
         }
         const r: Removal = { anchor, lines: del, oldStart, replacedBy: n ? { start: ln, end: ln + n - 1 } : undefined };
-        if (n && isReflow(del, Array.from({ length: n }, (_, k) => addedText.get(ln + k) ?? ''))) r.reflow = true;
+        // The item before a renumbered run tells whether the run starts its list (then its first number counts).
+        const afterItem = LIST_ITEM.test((contextText.get(oldStart - 1) ?? '').replace(QUOTES, ''));
+        if (n && isReflow(del, Array.from({ length: n }, (_, k) => addedText.get(ln + k) ?? ''), afterItem)) r.reflow = true;
         info.removals.push(r);
         ln += n;
       }
@@ -144,10 +146,15 @@ export function contentFromRemovedPatch(patch: string | undefined): string {
     .join('\n');
 }
 
-/** A unified diff of two versions of a file, in the shape GitHub's API returns (hunks only, no file headers). */
-export function diffTexts(oldText: string, newText: string): string {
+/**
+ * A unified diff of two versions of a file, in the shape GitHub's API returns (hunks only, no
+ * file headers). Null when the diff takes longer than `timeout` ms: it runs on the page's main
+ * thread, and two very different long files would freeze the tab for many seconds.
+ */
+export function diffTexts(oldText: string, newText: string, timeout = 2000): string | null {
   const eol = (s: string) => (s && !s.endsWith('\n') ? s + '\n' : s);
-  const patch = createTwoFilesPatch('a', 'b', eol(oldText.replace(/\r\n/g, '\n')), eol(newText.replace(/\r\n/g, '\n')), '', '', { context: 3 });
+  const patch = createTwoFilesPatch('a', 'b', eol(oldText.replace(/\r\n/g, '\n')), eol(newText.replace(/\r\n/g, '\n')), '', '', { context: 3, timeout }) as string | undefined;
+  if (patch === undefined) return null;
   const at = patch.indexOf('\n@@');
   return at < 0 ? '' : patch.slice(at + 1);
 }
@@ -168,10 +175,11 @@ const BLOCK_START = /^[ \t]*(?:#{1,6}(?:[ \t]|$)|<\/?[a-zA-Z]|\[[^\]]+\]:)/;
  * renders taken out: words, paragraph breaks, hard breaks, and the lines that start a block
  * (list items with their indentation, headings, table rows cell by cell, rules, HTML).
  */
-function signature(lines: string[]): string[] | null {
+function signature(lines: string[], afterItem = false): string[] | null {
   const out: string[] = [];
   let depth = 0;
   let blank = true;
+  let first = true;
   for (const raw of lines) {
     if (FENCE.test(raw.replace(QUOTES, ''))) return null; // whitespace inside code is significant
     const q = (QUOTES.exec(raw)?.[0].match(/>/g) ?? []).length;
@@ -184,9 +192,10 @@ function signature(lines: string[]): string[] | null {
     if (q !== depth) out.push(`>${q}`);
     depth = q;
     const indent = /^[ \t]*/.exec(line)![0].replace(/\t/g, '    ').length;
-    // Indented code (or a nested list's continuation): its indentation matters.
-    if (blank && indent >= 4) out.push(`I${indent}`);
     const item = LIST_ITEM.exec(line);
+    // Where a block starts, its indentation matters: it decides whether a paragraph belongs to the
+    // list item above it, and whether it is indented code.
+    if (blank && indent > 0 && !item) out.push(`I${indent}`);
     if (TABLE_ROW.test(line)) {
       // Cells without their padding; a delimiter row only by its alignment colons.
       const cells = line.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\s+/g, ' '));
@@ -201,7 +210,9 @@ function signature(lines: string[]): string[] | null {
     }
     let text = line;
     if (item) {
-      out.push(`L${indent}${item[2].replace(/\d+/, '1')}`);
+      // Renumbering the items of a list doesn't change how it renders, but the first item's number
+      // sets where the list starts: keep it where a run of items begins.
+      out.push(`L${indent}${blank && !(first && afterItem) ? item[2] : item[2].replace(/\d+/, '1')}`);
       text = line.slice(item[0].length);
     } else if (BLOCK_START.test(line)) {
       out.push('B');
@@ -209,15 +220,20 @@ function signature(lines: string[]): string[] | null {
     out.push(...text.trim().split(/\s+/).filter(Boolean));
     if (/(?: {2,}|\\)$/.test(line)) out.push('↵'); // a hard line break
     blank = false;
+    first = false;
   }
   return out;
 }
 
-/** The old and new lines differ only in line breaks and spacing that don't change the rendered text. */
-export function isReflow(oldLines: string[], newLines: string[]): boolean {
+/**
+ * The old and new lines differ only in line breaks and spacing that don't change the rendered
+ * text. `afterItem`: the line before them is a list item, so a renumbered first line continues a
+ * list rather than starting one.
+ */
+export function isReflow(oldLines: string[], newLines: string[], afterItem = false): boolean {
   if (oldLines.join('\n') === newLines.join('\n')) return false;
-  const a = signature(oldLines);
-  const b = signature(newLines);
+  const a = signature(oldLines, afterItem);
+  const b = signature(newLines, afterItem);
   return !!a && !!b && a.length > 0 && a.join('\u0000') === b.join('\u0000');
 }
 
@@ -364,17 +380,24 @@ function findMoves(info: DiffInfo, addedText: Map<number, string>, contextText: 
 
 /**
  * The diff to display. With `ignoreWhitespace`, re-wrapped and re-padded blocks stop counting
- * as changes (they are listed in `reflowed` so they can still be hinted at). Comment anchors
- * must keep using the original diff: GitHub only accepts lines of its own hunks.
+ * as changes (they are listed in `reflowed` so they can still be hinted at). `verbatim` holds the
+ * head lines where whitespace is always significant (code blocks, HTML, front matter): a change
+ * there is never hidden, even when only spacing moved. Comment anchors must keep using the
+ * original diff: GitHub only accepts lines of its own hunks.
  */
-export function presentDiff(diff: DiffInfo, ignoreWhitespace: boolean): DiffInfo {
+export function presentDiff(diff: DiffInfo, ignoreWhitespace: boolean, verbatim?: Set<number>): DiffInfo {
   if (!ignoreWhitespace || !diff.removals.some((r) => r.reflow)) return diff;
+  const inVerbatim = (r: Removal) => {
+    if (!verbatim || !r.replacedBy) return false;
+    for (let l = r.replacedBy.start; l <= r.replacedBy.end; l++) if (verbatim.has(l)) return true;
+    return false;
+  };
   const added = new Set(diff.added);
   const reflowed: HunkRange[] = [];
   const keep: Removal[] = [];
   const index = new Map<number, number>();
   diff.removals.forEach((r, i) => {
-    if (r.reflow && r.replacedBy) {
+    if (r.reflow && r.replacedBy && !inVerbatim(r)) {
       for (let l = r.replacedBy.start; l <= r.replacedBy.end; l++) added.delete(l);
       reflowed.push({ ...r.replacedBy });
     } else {

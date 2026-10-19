@@ -178,8 +178,9 @@ export function mount() {
     render();
     try {
       const mod = await loadReview();
+      // The reader may have navigated to another PR while review.js was loading: nothing to show then.
       if (!review && props()) review = mod.mountReview(shadow, overlay, props()!);
-      lock(true);
+      if (review) lock(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       showHint(/context invalidated/i.test(msg) ? 'The extension was updated. Reload this page to continue.' : `Couldn't load the review: ${msg}`);

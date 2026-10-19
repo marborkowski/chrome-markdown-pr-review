@@ -3,7 +3,7 @@ import { ApiError, drafts as draftStore, gh } from '../api';
 import { locateRemoved, narrowLines, resolveAnchor, type Anchor, type Side } from '../lib/anchor';
 import { anchorsOf, runChecks, type Finding } from '../lib/checks';
 import { findAnchor } from '../lib/gfm';
-import { outlineOf, parseMarkdown, type OutlineItem } from '../lib/outline';
+import { outlineOf, parseMarkdown, verbatimLines, type OutlineItem } from '../lib/outline';
 import { baseLines, contentFromRemovedPatch, diffTexts, emptyDiff, headToBase, parsePatch, presentDiff, type DiffInfo } from '../lib/patch';
 import { rangeToQuote } from '../lib/quote';
 import { prKey, type Commit, type Compare, type PendingComment, type PrContext, type PrFile, type PullRequest, type ReviewComment, type Thread, type ThreadState } from '../types';
@@ -249,7 +249,12 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
   const rawDiff = useMemo(() => (file && (file.patch || !isRemoved) ? parsePatch(file.patch) : null), [file, isRemoved]);
 
   /** What the highlighted changes are computed from. */
-  type Plan = { kind: 'patch'; patch: string } | { kind: 'texts'; sha: string; path: string } | { kind: 'none'; note?: string } | { kind: 'loading'; note: string };
+  type Plan =
+    | { kind: 'patch'; patch: string }
+    | { kind: 'texts'; sha: string; path: string }
+    /** Nothing to highlight; `empty`: the file didn't exist in the version compared against. */
+    | { kind: 'none'; note?: string; empty?: boolean }
+    | { kind: 'loading'; note: string };
   const plan = useMemo<Plan>(() => {
     if (!file || isRemoved) return { kind: 'none' };
     if (compare) {
@@ -257,12 +262,14 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
       const d = compareData.data;
       if (!d || d.status === 'diverged' || d.status === 'behind') return { kind: 'texts', sha: compare.sha, path: file.filename };
       const cf = d.files?.find((f) => f.filename === file.filename);
+      // GitHub lists at most 300 files of a comparison: beyond that a missing file is unknown, not unchanged.
+      if (!cf && (d.files?.length ?? 0) >= 300) return { kind: 'texts', sha: compare.sha, path: file.filename };
       if (!cf) return { kind: 'none', note: `No changes to this file since ${compare.label}.` };
-      if (cf.status === 'added') return { kind: 'none', note: `This file is new since ${compare.label}.` };
+      if (cf.status === 'added') return { kind: 'none', note: `This file is new since ${compare.label}.`, empty: true };
       if (cf.patch) return { kind: 'patch', patch: cf.patch };
       return { kind: 'texts', sha: compare.sha, path: cf.previous_filename ?? file.filename };
     }
-    if (file.status === 'added') return { kind: 'none' }; // everything would be green: just noise
+    if (file.status === 'added') return { kind: 'none', empty: true }; // everything would be green: just noise
     if (file.patch) return { kind: 'patch', patch: file.patch };
     if (!file.changes) return { kind: 'none' }; // a pure rename
     if (!mergeBase) return { kind: 'loading', note: 'GitHub sends no diff for this file (too large) – computing it…' };
@@ -286,17 +293,20 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
       .catch((e) => setBaseTexts((b) => ({ ...b, [baseKey!]: e instanceof ApiError && e.status === 404 ? { text: '' } : { error: errText(e) } })));
   }, [baseKey]);
 
+  /** A diff computed here (no patch from GitHub); null when it gave up: too large to do on the page's thread. */
+  const baseText = plan.kind === 'texts' ? baseTexts[baseKey!]?.text : undefined;
+  const localPatch = useMemo(() => (baseText !== undefined && text !== undefined ? diffTexts(baseText, text) : undefined), [baseText, text]);
   /** The diff the document highlights (before hiding whitespace-only changes). */
   const displayDiff = useMemo<DiffInfo | null>(() => {
     if (!file || isRemoved || text === undefined) return null;
     if (plan.kind === 'patch') return plan.patch === file.patch && rawDiff ? rawDiff : parsePatch(plan.patch);
-    if (plan.kind === 'texts') {
-      const base = baseTexts[baseKey!]?.text;
-      return base === undefined ? emptyDiff(true) : parsePatch(diffTexts(base, text));
-    }
+    if (plan.kind === 'texts') return localPatch ? parsePatch(localPatch) : emptyDiff(true);
     return emptyDiff(true);
-  }, [file, isRemoved, text, plan, rawDiff, baseTexts, baseKey]);
-  const shownDiff = useMemo(() => (displayDiff ? presentDiff(displayDiff, view.ignoreWs) : null), [displayDiff, view.ignoreWs]);
+  }, [file, isRemoved, text, plan, rawDiff, localPatch]);
+  const tree = useMemo(() => (text ? parseMarkdown(text) : null), [text]);
+  /** Lines of code blocks, HTML and front matter: a change there is never "just whitespace". */
+  const verbatim = useMemo(() => (tree ? verbatimLines(tree) : undefined), [tree]);
+  const shownDiff = useMemo(() => (displayDiff ? presentDiff(displayDiff, view.ignoreWs, verbatim) : null), [displayDiff, view.ignoreWs, verbatim]);
   /** Comments on removed text need GitHub's own diff on screen (their lines are lines of the PR's base). */
   const leftOk = !!file && !isRemoved && !compare && !!file.patch && plan.kind === 'patch';
   /** For a deleted file, its patch (all of it removed) anchors comments on the left side. */
@@ -342,7 +352,6 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
   );
 
   // ---- outline & checks ---------------------------------------------------
-  const tree = useMemo(() => (text ? parseMarkdown(text) : null), [text]);
   const commentLines = useMemo(() => [...threadLines, ...pendingLines], [threadLines, pendingLines]);
   const outline = useMemo(() => (tree ? outlineOf(tree, lines, isRemoved ? null : shownDiff, commentLines) : []), [tree, lines, shownDiff, commentLines, isRemoved]);
   const needsPaths = useMemo(() => !!text && /\]\((?![a-z][a-z0-9+.-]*:|#|\/\/)[^)\s]|(?:src|href)=["'](?![a-z][a-z0-9+.-]*:|#|\/\/)/i.test(text), [text]);
@@ -380,7 +389,8 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
   const onMouseUp = () => {
     window.setTimeout(() => {
       const sel = getSelection();
-      const area = (mode === 'split' ? docRef.current?.closest('.mdr-split') : docRef.current) as Element | null | undefined;
+      // In split view the old version is commentable too (a deleted file never gets a split view).
+      const area = (docRef.current?.closest('.mdr-split') ?? docRef.current) as Element | null | undefined;
       if (!sel || sel.isCollapsed || !sel.rangeCount || !area) return setToolbar(null);
       const range = sel.getRangeAt(0);
       if (!area.contains(range.commonAncestorContainer)) return setToolbar(null);
@@ -834,7 +844,7 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
   const isViewed = !!(viewed && file && viewed[file.filename]);
   const unchanged = useMemo(() => {
     const d = compareData?.data;
-    if (!compare || !d || d.status === 'diverged' || d.status === 'behind') return null;
+    if (!compare || !d || d.status === 'diverged' || d.status === 'behind' || (d.files?.length ?? 0) >= 300) return null;
     const changed = new Set((d.files ?? []).map((f) => f.filename));
     return new Set(files.filter((f) => !changed.has(f.filename)).map((f) => f.filename));
   }, [compare, compareData, files]);
@@ -858,7 +868,10 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
   /** The old version for split view: the base text, its removed lines marked (in base numbering). */
   const before = useMemo(() => {
     if (mode !== 'split' || !file || text === undefined || !displayDiff || !shownDiff) return null;
-    const source = plan.kind === 'texts' ? baseTexts[baseKey!]?.text ?? '' : file.status === 'added' && !compare ? '' : baseLines(displayDiff, lines).join('\n');
+    const empty = plan.kind === 'none' && !!plan.empty;
+    const error = plan.kind === 'texts' ? baseTexts[baseKey!]?.error : undefined;
+    const loading = plan.kind === 'loading' || (plan.kind === 'texts' && baseText === undefined && !error);
+    const source = plan.kind === 'texts' ? baseText ?? '' : empty ? '' : baseLines(displayDiff, lines).join('\n');
     const diff = emptyDiff(true);
     for (const r of shownDiff.removals) {
       const moved = new Set<number>();
@@ -869,8 +882,8 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
         diff.added.add(r.oldStart + k);
       });
     }
-    return { source, diff, map: headToBase(displayDiff, lines.length) };
-  }, [mode, file, text, displayDiff, shownDiff, plan, baseTexts, baseKey, lines, compare]);
+    return { source, diff, map: headToBase(displayDiff, lines.length), empty, error, loading };
+  }, [mode, file, text, displayDiff, shownDiff, plan, baseText, baseTexts, baseKey, lines]);
 
   const renderDoc = () => {
     if (!file || text === undefined) return null;
@@ -917,7 +930,9 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
                   </ErrorBoundary>
                 </article>
               ) : (
-                <p className="mdr-muted mdr-empty-doc">{file.status === 'added' || plan.kind === 'none' ? 'The file didn’t exist before.' : 'Loading…'}</p>
+                <p className="mdr-muted mdr-empty-doc">
+                  {before.empty ? 'The file didn’t exist before.' : before.error ? `Couldn’t load the previous version: ${before.error}` : before.loading ? 'Loading…' : 'The file was empty before.'}
+                </p>
               )
             }
             after={
@@ -934,7 +949,7 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
     return (
       <div className="mdr-doc-wrap">
         <article ref={docRef} className="markdown-body mdr-doc mdr-mode-rendered" onMouseUp={onMouseUp} onMouseMove={onDocMouseMove}>
-          <ErrorBoundary key={file.filename} fallback={fallback}>
+          <ErrorBoundary key={`${file.filename}:${view.docsSyntax}:${view.inline}`} fallback={fallback}>
             <MarkdownDoc {...docProps} source={text} diff={shownDiff} inlineDiff={view.inline} fold={view.fold} resolveUrl={headResolver} />
           </ErrorBoundary>
         </article>
@@ -942,7 +957,15 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
     );
   };
 
-  const note = plan.kind === 'none' || plan.kind === 'loading' ? plan.note : undefined;
+  const baseError = plan.kind === 'texts' ? baseTexts[baseKey!]?.error : undefined;
+  const note =
+    plan.kind === 'none' || plan.kind === 'loading'
+      ? plan.note
+      : baseError
+        ? `Couldn't load the previous version of this file (${baseError}) – changes aren't highlighted.`
+        : localPatch === null
+          ? 'The two versions of this file differ too much to compare in the browser – changes aren\'t highlighted and comments will be file-level.'
+          : undefined;
   const split = mode === 'split' && !isRemoved && !!file && text !== undefined;
 
   return (

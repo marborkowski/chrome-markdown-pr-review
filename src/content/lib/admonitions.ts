@@ -26,6 +26,8 @@ const KINDS: Record<string, string> = {
 };
 
 const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+/** The callout kind for an admonition type, or undefined (a plain object lookup would find "constructor"). */
+const kindOf = (name: string) => (Object.prototype.hasOwnProperty.call(KINDS, name.toLowerCase()) ? KINDS[name.toLowerCase()] : undefined);
 
 const DOCUSAURUS_OPEN = /^(:{3,})([a-zA-Z]+)(?:\[([^\]\n]*)\]| +([^\n{]*?))?(?:\{[^}\n]*\})?[ \t]*$/;
 const MKDOCS_OPEN = /^(?:!!!|\?\?\?\+?)[ \t]+([a-zA-Z][\w-]*)(?:[ \t]+"([^"\n]*)")?[ \t]*$/;
@@ -84,7 +86,7 @@ function callout(kind: string, title: string | undefined, children: RootContent[
     type: 'blockquote',
     children: children as BlockContent[],
     position,
-    data: { hName: 'div', hProperties: { dataCallout: KINDS[kind.toLowerCase()], dataCalloutTitle: title?.trim() || titleCase(kind) } },
+    data: { hName: 'div', hProperties: { dataCallout: kindOf(kind), dataCalloutTitle: title?.trim() || titleCase(kind) } },
   };
 }
 
@@ -143,7 +145,7 @@ export function remarkAdmonitions(this: any) {
         if (head === null) continue;
 
         const d = DOCUSAURUS_OPEN.exec(head);
-        if (d && KINDS[d[2].toLowerCase()]) {
+        if (d && kindOf(d[2])) {
           const colons = d[1].length;
           const closes = (l: string | null) => l !== null && new RegExp(`^:{${colons}}[ \\t]*$`).test(l);
           const open = kids[i] as Paragraph;
@@ -167,7 +169,7 @@ export function remarkAdmonitions(this: any) {
         }
 
         const m = MKDOCS_OPEN.exec(head);
-        if (m && KINDS[m[1].toLowerCase()]) {
+        if (m && kindOf(m[1])) {
           const open = kids[i] as Paragraph;
           const rest = dropFirstLine(open, at);
           const inner: RootContent[] = rest ? [rest] : [];
