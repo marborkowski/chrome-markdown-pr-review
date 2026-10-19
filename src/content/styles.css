@@ -204,8 +204,10 @@ kbd {
 .mdr-doc .mdr-inline { background: transparent; box-shadow: none; }
 
 .mdr-worddiff { white-space: pre-wrap; }
-.mdr-worddiff ins { background: var(--ins-bg); text-decoration: none; border-radius: 3px; padding: 0 1px; }
-.mdr-worddiff del { background: var(--del-strong); color: inherit; text-decoration: line-through; text-decoration-color: var(--del-fg); border-radius: 3px; padding: 0 1px; }
+.mdr-worddiff .mdr-d-ins { background: var(--ins-bg); text-decoration: none; border-radius: 3px; padding: 0 1px; }
+.mdr-worddiff .mdr-d-del { background: var(--del-strong); color: inherit; text-decoration: line-through; text-decoration-color: var(--del-fg); border-radius: 3px; padding: 0 1px; }
+.mdr-worddiff code .mdr-d-ins, .mdr-worddiff code .mdr-d-del { padding: 0; }
+.mdr-doc .markdown-alert-title .octicon { margin-right: 8px; fill: currentColor; }
 
 .mdr-removed { margin: 0 0 16px; border-left: 3px solid var(--del-fg); border-radius: 0 6px 6px 0; background: var(--del-bg); list-style: none; }
 .mdr-removed-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 12px; border: 0; background: transparent; color: var(--del-fg); font-size: 12px; font-weight: 600; text-align: left; }
@@ -271,6 +273,15 @@ kbd {
 .mdr-comment-body.markdown-body > :last-child { margin-bottom: 0; }
 .mdr-comment-body.markdown-body blockquote { padding: 0 0.8em; }
 .mdr-comment-body.markdown-body pre { padding: 8px; font-size: 12px; }
+.mdr-thread-top { margin-bottom: 6px; min-height: 22px; }
+.mdr-thread-top .mdr-thread-label { margin-bottom: 0; }
+.mdr-thread-resolved { opacity: 0.85; }
+.mdr-btn-small { height: 24px; padding: 0 8px; font-size: 12px; }
+.mdr-icon-small { min-width: 24px; height: 24px; font-size: 13px; }
+.mdr-stale { margin: 0 0 6px; }
+.mdr-collapsible { margin-top: 10px; }
+.mdr-small { font-size: 12px; }
+.mdr-empty-doc { margin: 24px 4px; }
 .mdr-reply { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 .mdr-reply-open { width: 100%; margin-top: 10px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-subtle); color: var(--muted); text-align: left; font-size: 13px; }
 

@@ -133,6 +133,44 @@ await page.locator('.mdr-badge-thread').first().click();
 await page.waitForTimeout(400);
 await page.screenshot({ path: `${shots}/09-dark.png` });
 
+// 7) GitHub alerts, in-document anchors and links to other Markdown files of the PR.
+await page.evaluate(() => { document.documentElement.dataset.colorMode = 'light'; });
+await page.locator('.mdr-file', { hasText: 'README' }).click();
+await page.locator('.mdr-doc .markdown-alert-note').waitFor();
+assert.match(await page.locator('.mdr-doc .markdown-alert-title').innerText(), /Note/);
+await page.locator('.mdr-doc a', { hasText: 'Running locally' }).click();
+await page.locator('.mdr-doc h2#running-locally.mdr-flash').waitFor();
+await page.locator('.mdr-doc a', { hasText: 'goals' }).click();
+await page.locator('.mdr-filebar-path', { hasText: 'docs/architecture.md' }).waitFor();
+await page.locator('.mdr-doc h2#goals.mdr-flash').waitFor();
+await page.screenshot({ path: `${shots}/10-anchor.png` });
+
+// 8) Resolve a conversation: it moves to the collapsed "Resolved" section.
+const convCount = () => page.locator('.mdr-panel h4', { hasText: 'Conversations' }).locator('.mdr-count').innerText();
+const before = Number(await convCount());
+await page.locator('.mdr-thread', { hasText: 'SLA of the fraud service' }).locator('button', { hasText: 'Resolve' }).click();
+await page.locator('.mdr-panel .mdr-link', { hasText: 'Resolved conversations (1)' }).waitFor();
+assert.equal(Number(await convCount()), before - 1);
+calls = await page.evaluate(() => window.__calls);
+assert.ok(calls.some((c) => c.path === 'graphql' && c.body.query.includes('resolveReviewThread')), 'resolve mutation sent');
+
+// 9) Esc in a reply box leaves the box, it doesn't close the review.
+await page.locator('.mdr-reply-open').first().click();
+await page.locator('.mdr-reply textarea').fill('Half-written reply');
+await page.keyboard.press('Escape');
+assert.equal(await page.locator('.mdr-overlay').count(), 1, 'review stays open');
+assert.equal(await page.locator('.mdr-reply textarea').inputValue(), 'Half-written reply');
+await page.locator('.mdr-reply button', { hasText: 'Cancel' }).click();
+
+// 10) Esc on a written comment asks before discarding it.
+await selectText('h2', 'Request flow');
+await page.keyboard.press('c');
+await page.locator('.mdr-composer textarea').fill('Half-written thought');
+await page.keyboard.press('Escape');
+await page.locator('.mdr-composer .mdr-warn').waitFor();
+await page.keyboard.press('Escape');
+assert.equal(await page.locator('.mdr-composer').count(), 0, 'second Esc discards');
+
 assert.deepEqual(errors, [], 'no console errors');
 console.log('E2E OK –', calls.length, 'write calls recorded');
 await browser.close();

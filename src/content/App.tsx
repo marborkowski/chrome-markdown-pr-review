@@ -76,13 +76,14 @@ export function App() {
   }, [key, reloadKey]);
 
   const toggle = useCallback(() => {
-    if (!ctx) {
-      setHint('Open a pull request to review its Markdown files.');
+    const noFiles = load.state === 'ready' && !load.files.length;
+    if (!ctx || noFiles) {
+      setHint(noFiles ? 'This pull request has no Markdown files.' : 'Open a pull request to review its Markdown files.');
       window.setTimeout(() => setHint(null), 3500);
       return;
     }
     setOpen((o) => !o);
-  }, [ctx]);
+  }, [ctx, load]);
 
   useEffect(() => {
     const onMsg = (msg: any) => {

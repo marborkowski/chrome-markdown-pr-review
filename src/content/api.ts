@@ -1,5 +1,5 @@
 import type { ApiRequest, ApiResponse } from '../shared/messages';
-import type { PendingComment, PrContext, PrFile, PullRequest, ReviewComment } from './types';
+import type { PendingComment, PrContext, PrFile, PullRequest, ReviewComment, ThreadState } from './types';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public needsToken = false) {
@@ -139,6 +139,43 @@ export const gh = {
     }
     return out;
   },
+
+  /** Review threads (GraphQL id + resolved), keyed by the id of each thread's first comment. */
+  reviewThreads: async (c: PrContext): Promise<Map<number, ThreadState>> => {
+    const out = new Map<number, ThreadState>();
+    let after: string | null = null;
+    for (let i = 0; i < 40; i++) {
+      const data: any = await call(c, {
+        method: 'POST',
+        path: 'graphql',
+        body: {
+          query: `query($o:String!,$r:String!,$n:Int!,$a:String){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100,after:$a){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}`,
+          variables: { o: c.owner, r: c.repo, n: c.number, a: after },
+        },
+      });
+      const threads = data?.data?.repository?.pullRequest?.reviewThreads;
+      if (!threads) break;
+      for (const t of threads.nodes) {
+        const first = t.comments?.nodes?.[0]?.databaseId;
+        if (first) out.set(first, { id: t.id, resolved: !!t.isResolved });
+      }
+      if (!threads.pageInfo.hasNextPage) break;
+      after = threads.pageInfo.endCursor;
+    }
+    return out;
+  },
+
+  setThreadResolved: (c: PrContext, threadId: string, resolved: boolean) =>
+    call(c, {
+      method: 'POST',
+      path: 'graphql',
+      body: {
+        query: resolved
+          ? `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}`
+          : `mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}`,
+        variables: { id: threadId },
+      },
+    }),
 
   setViewed: (c: PrContext, prNodeId: string, path: string, viewed: boolean) =>
     call(c, {

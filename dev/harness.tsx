@@ -46,12 +46,13 @@ const comments: any[] = [
 
 const files = [
   { filename: 'docs/architecture.md', status: 'modified', additions: 22, deletions: 14, changes: 36, sha: 'a', patch: modifiedPatch },
-  { filename: 'README.md', status: 'added', additions: 14, deletions: 0, changes: 14, sha: 'b', patch: readmePatch },
+  { filename: 'README.md', status: 'added', additions: 21, deletions: 0, changes: 21, sha: 'b', patch: readmePatch },
   { filename: 'docs/legacy-export.md', status: 'removed', additions: 0, deletions: 3, changes: 3, sha: 'c', patch: legacyPatch },
   { filename: 'src/payments/adapter.ts', status: 'modified', additions: 40, deletions: 12, changes: 52, sha: 'd', patch: '@@ -1 +1 @@\n-a\n+b' },
 ];
 
 const viewed: Record<string, boolean> = { 'README.md': true };
+const resolved = new Set<number>();
 
 window.__calls = [];
 
@@ -63,6 +64,16 @@ async function mock(req: ApiRequest): Promise<ApiResponse> {
 
   if (path === 'graphql') {
     const q = (body as any).query as string;
+    if (q.includes('reviewThreads')) {
+      const nodes = comments.filter((c) => !c.in_reply_to_id).map((c) => ({ id: `T${c.id}`, isResolved: resolved.has(c.id), comments: { nodes: [{ databaseId: c.id }] } }));
+      return ok({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes } } } } });
+    }
+    if (q.includes('ReviewThread')) {
+      const id = Number(String((body as any).variables.id).slice(1));
+      if (q.includes('unresolve')) resolved.delete(id);
+      else resolved.add(id);
+      return ok({ data: {} });
+    }
     if (q.startsWith('query')) {
       return ok({ data: { repository: { pullRequest: { files: { pageInfo: { hasNextPage: false }, nodes: files.map((f) => ({ path: f.filename, viewerViewedState: viewed[f.filename] ? 'VIEWED' : 'UNVIEWED' })) } } } } });
     }

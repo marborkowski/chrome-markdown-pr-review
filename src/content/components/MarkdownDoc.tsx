@@ -1,8 +1,10 @@
-import { Children, cloneElement, createContext, isValidElement, memo, useContext, useMemo, useState, type ReactElement } from 'react';
+import { Children, cloneElement, createContext, isValidElement, memo, useContext, useMemo, useState, type MouseEvent, type ReactElement } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
 import { BLOCK_TAGS, rehypeAnnotate } from '../lib/annotate';
+import { findAnchor, rehypeHeadingIds, remarkAlerts } from '../lib/gfm';
+import { blockDiffSource, markdownDiffSource, rehypeDiffMarks } from '../lib/inlineDiff';
 import type { DiffInfo } from '../lib/patch';
 import { WordDiff } from './WordDiff';
 
@@ -12,11 +14,61 @@ interface DocCtxValue {
   diff: DiffInfo | null;
   lines: string[];
   inlineDiff: boolean;
+  resolveUrl: UrlResolver;
   onBadge: (sl: number, el: number) => void;
   onMods: (mods: number[], anchor: HTMLElement) => void;
+  onLink?: (href: string) => boolean;
 }
 
 const DocCtx = createContext<DocCtxValue>(null as any);
+
+/** Scroll an element into view and flash it. */
+export function reveal(el: Element) {
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.add('mdr-flash');
+  window.setTimeout(() => el.classList.remove('mdr-flash'), 1300);
+}
+
+/** In-document anchors scroll inside the review; links to other files of the PR open them here. */
+function DocLink({ node: _n, href, ...props }: any) {
+  const ctx = useContext(DocCtx);
+  const internal = typeof href === 'string' && href.startsWith('#');
+  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (!href || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (internal) {
+      e.preventDefault();
+      const target = findAnchor(e.currentTarget.closest('.mdr-doc'), href.slice(1));
+      if (target) reveal(target);
+    } else if (ctx?.onLink?.(href)) {
+      e.preventDefault();
+    }
+  };
+  return <a {...props} href={href} onClick={onClick} {...(internal ? {} : { target: '_blank', rel: 'noopener noreferrer' })} />;
+}
+
+/** What a word diff may contain once rendered: inline Markdown only (it lives inside a <p>, <li>, …). */
+const DIFF_INLINE = ['code', 'strong', 'em', 'del', 'ins', 'a', 'img', 'br', 'sup', 'sub', 'kbd'];
+const diffComponents: Components = { a: DocLink };
+
+/** Word diff of a block's Markdown source, rendered as Markdown with insertions and deletions marked. */
+function MarkdownWordDiff({ oldText, newText }: { oldText: string; newText: string }) {
+  const ctx = useContext(DocCtx);
+  const source = useMemo(() => markdownDiffSource(oldText, newText), [oldText, newText]);
+  return (
+    <span className="mdr-worddiff mdr-worddiff-md">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeDiffMarks]}
+        allowedElements={DIFF_INLINE}
+        unwrapDisallowed
+        components={diffComponents}
+        urlTransform={(url, key) => ctx.resolveUrl(url, key)}
+      >
+        {source}
+      </ReactMarkdown>
+    </span>
+  );
+}
 
 const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
 
@@ -26,7 +78,7 @@ const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
  * markers) and turn soft line breaks into spaces, like the rendered paragraph does.
  */
 export function cleanForInline(tag: string, text: string): string {
-  if (tag === 'pre') return text;
+  if (tag === 'pre') return text.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*(\n|$)/, '').replace(/(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*$/, '');
   let lines = text.split('\n');
   if (tag === 'blockquote') lines = lines.map((l) => l.replace(/^\s*>\s?/, ''));
   if (/^h[1-6]$/.test(tag)) lines = lines.map((l) => l.replace(/^\s*#{1,6}\s+/, '').replace(/\s+#+\s*$/, ''));
@@ -128,19 +180,29 @@ function makeBlock(Tag: string) {
     const El = Tag as any;
 
     if (ctx.inlineDiff && ctx.diff && Tag !== 'tr' && Tag !== 'table') {
-      const repl = mods.filter((i) => ctx.diff!.removals[i]?.replacedBy);
-      if (!repl.length && cont.length) return null; // rendered as part of the block that starts the change
-      if (repl.length) {
-        const rs = repl.map((i) => ctx.diff!.removals[i]);
-        const start = Math.min(...rs.map((r) => r.replacedBy!.start));
-        const end = Math.max(...rs.map((r) => r.replacedBy!.end));
-        const oldText = cleanForInline(Tag, rs.flatMap((r) => r.lines).join('\n'));
-        const newText = cleanForInline(Tag, ctx.lines.slice(start - 1, end).join('\n'));
-        const rest = mods.filter((i) => !repl.includes(i));
+      const { removals } = ctx.diff;
+      const own = mods.filter((i) => removals[i]);
+      if (!own.length && cont.length) return null; // rendered as part of the block that starts the change
+      if (own.length) {
+        const repl = own.flatMap((i) => removals[i].replacedBy ?? []);
+        const start = Math.min(sl, ...repl.map((r) => r.start));
+        const reach = Math.max(0, Number(props['data-mod-el'] ?? 0), ...repl.map((r) => r.end));
+        const end = Math.max(el, reach);
+        // Nested blocks the change doesn't reach (e.g. a sub-list) keep rendering as themselves.
+        const nested = Children.toArray(children).filter(
+          (k): k is ReactElement<any> => isValidElement(k) && (k.props as any)['data-block'] !== undefined && Number((k.props as any)['data-sl']) > start,
+        );
+        const cutAt = nested.length ? Number(nested[0].props['data-sl']) : Infinity;
+        const keepNested = cutAt <= end && reach < cutAt;
+        const src = blockDiffSource(ctx.lines, removals, start, keepNested ? cutAt - 1 : end);
+        const oldText = cleanForInline(Tag, src.oldText);
+        const newText = cleanForInline(Tag, src.newText);
+        const rest = own.filter((i) => !src.used.has(i));
         const Wrap = VOID_TAGS.has(Tag) ? 'div' : El; // the word diff needs an element that can hold it
         return (
-          <Wrap {...props} data-sl={Math.min(sl, start)} data-el={Math.max(el, end)} className={`${props.className ?? ''} mdr-inline`}>
-            <WordDiff oldText={oldText} newText={newText} />
+          <Wrap {...props} data-sl={start} data-el={end} className={`${props.className ?? ''} mdr-inline`}>
+            {Tag === 'pre' ? <WordDiff oldText={oldText} newText={newText} /> : <MarkdownWordDiff oldText={oldText} newText={newText} />}
+            {keepNested && nested}
             <Gutter threads={threads} pending={pending} mods={rest} sl={sl} el={el} />
           </Wrap>
         );
@@ -177,7 +239,7 @@ function makeBlock(Tag: string) {
 
 const components: Components = {
   ...Object.fromEntries(BLOCK_TAGS.map((t) => [t, makeBlock(t)])),
-  a: ({ node: _n, ...props }: any) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+  a: DocLink,
   input: ({ node: _n, ...props }: any) => <input {...props} disabled />,
 };
 
@@ -191,22 +253,24 @@ export interface MarkdownDocProps {
   resolveUrl: UrlResolver;
   onBadge: (sl: number, el: number) => void;
   onMods: (mods: number[], anchor: HTMLElement) => void;
+  /** Return true when the link was handled inside the review (e.g. another Markdown file of the PR). */
+  onLink?: (href: string) => boolean;
 }
 
 export const MarkdownDoc = memo(function MarkdownDoc(p: MarkdownDocProps) {
   const lines = useMemo(() => p.source.split(/\r?\n/), [p.source]);
   const ctx = useMemo<DocCtxValue>(
-    () => ({ diff: p.diff, lines, inlineDiff: p.inlineDiff, onBadge: p.onBadge, onMods: p.onMods }),
-    [p.diff, lines, p.inlineDiff, p.onBadge, p.onMods],
+    () => ({ diff: p.diff, lines, inlineDiff: p.inlineDiff, resolveUrl: p.resolveUrl, onBadge: p.onBadge, onMods: p.onMods, onLink: p.onLink }),
+    [p.diff, lines, p.inlineDiff, p.resolveUrl, p.onBadge, p.onMods, p.onLink],
   );
   const rehypePlugins = useMemo(
-    () => [[rehypeAnnotate, { diff: p.diff, lines, threadLines: p.threadLines, pendingLines: p.pendingLines, activeRange: p.activeRange }]] as any,
+    () => [rehypeHeadingIds, [rehypeAnnotate, { diff: p.diff, lines, threadLines: p.threadLines, pendingLines: p.pendingLines, activeRange: p.activeRange }]] as any,
     [p.diff, lines, p.threadLines, p.pendingLines, p.activeRange],
   );
   return (
     <DocCtx.Provider value={ctx}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkFrontmatter]}
+        remarkPlugins={[remarkGfm, remarkFrontmatter, remarkAlerts]}
         remarkRehypeOptions={remarkRehypeOptions}
         rehypePlugins={rehypePlugins}
         components={components}

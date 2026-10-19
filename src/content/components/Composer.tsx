@@ -29,8 +29,11 @@ export function Composer({ target, lines, hasDrafts, busy, onCancel, onSubmit }:
   const suggestionText = () =>
     '```suggestion\n' + lines.slice(anchor.start - 1, anchor.end).join('\n') + '\n```\n';
   const canSuggest = anchor.kind === 'line';
-  const [text, setText] = useState(() => (target.suggest && canSuggest ? suggestionText() : ''));
+  const [initial] = useState(() => (target.suggest && canSuggest ? suggestionText() : ''));
+  const [text, setText] = useState(initial);
   const [includeQuote, setIncludeQuote] = useState(!(target.suggest && canSuggest));
+  /** Esc on a comment with real content asks for a second Esc instead of silently dropping it. */
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const ta = useRef<HTMLTextAreaElement>(null);
   const [pos, setPos] = useState({ top: target.rect.bottom + 10, left: target.rect.left });
@@ -77,7 +80,8 @@ export function Composer({ target, lines, hasDrafts, busy, onCancel, onSubmit }:
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
           e.stopPropagation();
-          onCancel();
+          if (text.trim() && text !== initial && !confirmDiscard) setConfirmDiscard(true);
+          else onCancel();
         }
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
           e.preventDefault();
@@ -106,10 +110,14 @@ export function Composer({ target, lines, hasDrafts, busy, onCancel, onSubmit }:
       <textarea
         ref={ta}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setConfirmDiscard(false);
+        }}
         placeholder="Leave a comment (Markdown supported)"
         rows={text.split('\n').length > 4 ? Math.min(14, text.split('\n').length + 1) : 4}
       />
+      {confirmDiscard && <div className="mdr-warn">Press Esc again to discard this comment.</div>}
       <div className="mdr-composer-actions">
         <button className="mdr-btn mdr-btn-ghost" onClick={insertSuggestion} disabled={!canSuggest} title={canSuggest ? 'Propose replacement text (GitHub suggestion)' : 'Suggestions need lines inside the diff'}>
           ± Suggest change
