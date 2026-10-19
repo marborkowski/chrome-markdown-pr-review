@@ -104,6 +104,59 @@ describe('inline word diff', () => {
     expect(strip(html)).toContain('third line');
   });
 
+  const items = (html: string) => [...html.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((m) => m[1]);
+
+  it('gives each list item of a change spanning several items its own part of the word diff', () => {
+    const before = '1. Intro item.\n2. The gateway validates the request.\n3. The adapter calls the network.\n4. Outro item.';
+    const after = before.replace('validates the request', 'validates and signs the request').replace('calls the network', 'calls the card network');
+    const html = inline(before, after);
+    const li = items(html);
+    expect(li).toHaveLength(4);
+    expect(strip(li[1])).toBe('The gateway validates and signs the request.');
+    expect(li[1]).toMatch(/<ins class="mdr-d-ins">[^<]*signs/);
+    expect(strip(li[2])).toBe('The adapter calls the card network.');
+    expect(li[2]).toMatch(/<ins class="mdr-d-ins">[^<]*card/);
+    expect(strip(li[0])).toBe('Intro item.');
+    expect(strip(li[3])).toBe('Outro item.');
+  });
+
+  it('shows removed words in the list item they were removed from', () => {
+    const before = '- Keep the ledger as the single source of truth.\n- Support retries without double charging.';
+    const html = inline(before, '- Keep the ledger as the source of truth.\n- Support retries.');
+    const li = items(html);
+    expect(li).toHaveLength(2);
+    expect(li[0]).toMatch(/<del class="mdr-d-del">[^<]*single/);
+    expect(li[0]).not.toContain('charging');
+    expect(li[1]).toMatch(/<del class="mdr-d-del">[^<]*double charging/);
+    expect(li[1]).not.toContain('single');
+  });
+
+  it('keeps an inserted item separate from the item it was inserted before', () => {
+    const before = '1. Create the intent.\n2. Call the card network.';
+    const after = '1. Create the intent.\n2. Score the intent for fraud.\n3. Call the card network.';
+    const li = items(inline(before, after));
+    expect(li).toHaveLength(3);
+    expect(strip(li[1])).toBe('Score the intent for fraud.');
+    expect(strip(li[2])).toBe('Call the card network.');
+    expect(li[2]).not.toMatch(/mdr-d-(ins|del)/);
+  });
+
+  it('gives each of several changed paragraphs its own word diff', () => {
+    const before = 'The first paragraph is short.\n\nThe second one is short too.';
+    const html = inline(before, 'The first paragraph is longer now.\n\nThe second one is longer too.');
+    const ps = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)].map((m) => m[1]);
+    expect(ps).toHaveLength(2);
+    expect(strip(ps[0])).toBe('The first paragraph is shortlonger now.');
+    expect(strip(ps[1])).toBe('The second one is shortlonger too.');
+  });
+
+  it('still folds a change into the first block when the blocks are of different kinds', () => {
+    const before = 'The adapter is synchronous.';
+    const html = inline(before, 'The adapter is asynchronous.\n\n```js\npublish(event);\n```');
+    expect(html).not.toContain('<pre');
+    expect(strip(html)).toContain('publish(event);');
+  });
+
   it('marks formatting changes without breaking the surrounding code spans', () => {
     const before = '`applyPermissionChange` applies one intention (`level`, `create`, `clear`, `manage`).';
     const html = inline(before, before.replace('`clear`, ', ''));

@@ -1,6 +1,7 @@
 import type { Element, ElementContent, Root, Parent } from 'hast';
 import { visit } from 'unist-util-visit';
-import type { DiffInfo } from './patch';
+import { splitRemoved } from './inlineDiff';
+import type { DiffInfo, Removal } from './patch';
 
 /** Elements that represent a block of source lines and can own changes, threads and comments. */
 export const BLOCK_TAGS = [
@@ -9,6 +10,9 @@ export const BLOCK_TAGS = [
 ] as const;
 const BLOCK = new Set<string>(BLOCK_TAGS);
 const CONTAINERS = new Set(['ul', 'ol', 'table', 'blockquote', 'dl', 'details', 'div']);
+/** Sibling blocks of these kinds share out a replacement spanning them instead of folding it into the first one. */
+const SPLIT_TAGS = new Set(['li', 'p']);
+const hasBlocks = (n: Element): boolean => n.children.some((c) => c.type === 'element' && (BLOCK.has(c.tagName) || hasBlocks(c)));
 
 export interface AnnotateOptions {
   diff: DiffInfo | null;
@@ -33,7 +37,7 @@ function addClass(node: Element, cls: string) {
   node.properties.className = list;
 }
 
-function appendIdx(node: Element, key: string, i: number) {
+function appendIdx(node: Element, key: string, i: number | string) {
   const cur = node.properties[key];
   node.properties[key] = cur === undefined || cur === null || cur === '' ? String(i) : `${cur} ${i}`;
 }
@@ -74,6 +78,17 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
     };
     const isBlank = (line: number) => !(opts.lines[line - 1] ?? '').trim();
 
+    /** Each block's slice of a replacement's removed lines when it spans sibling list items or paragraphs, else null. */
+    const splitAmong = (r: Removal, first: number, group: BlockRec[]) => {
+      const [o] = group;
+      const last = group[group.length - 1];
+      if (group.length < 2 || !SPLIT_TAGS.has(o.node.tagName)) return null;
+      if (group.some((b) => b.node.tagName !== o.node.tagName || b.parent !== o.parent || hasBlocks(b.node))) return null;
+      const { start, end } = r.replacedBy!;
+      const shown = group.map((b) => opts.lines.slice(Math.max(b.sl, start) - 1, Math.min(b.el, end)));
+      return splitRemoved(r.lines, shown, o.node.tagName, o.sl < first, last.el > end);
+    };
+
     const { diff } = opts;
     if (diff) {
       for (const l of diff.added) {
@@ -89,20 +104,26 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
           for (let l = r.replacedBy.start; l <= r.replacedBy.end; l++) if (!isBlank(l)) { first = l; break; }
           const o = first > 0 ? ownerOf(first) : null;
           if (o) {
-            appendIdx(o.node, 'dataMods', i);
-            addClass(o.node, 'mdr-mod');
-            const seen = new Set([o]);
-            let reach = o.el;
+            const group = [o];
             for (let l = first + 1; l <= r.replacedBy.end; l++) {
               if (isBlank(l)) continue;
               const c = ownerOf(l);
-              if (c && !seen.has(c) && !CONTAINERS.has(c.node.tagName)) {
-                seen.add(c);
-                appendIdx(c.node, 'dataModCont', i);
-                reach = Math.max(reach, c.el);
-              }
+              if (c && !group.includes(c) && !CONTAINERS.has(c.node.tagName)) group.push(c);
             }
+            const parts = splitAmong(r, first, group);
+            if (parts) {
+              // Each block shows its own share; the first one that had removed lines owns the change.
+              const owner = group.find((_, k) => parts[k][1] > parts[k][0]) ?? o;
+              appendIdx(owner.node, 'dataMods', i);
+              addClass(owner.node, 'mdr-mod');
+              group.forEach((b, k) => appendIdx(b.node, 'dataModPart', `${i}:${parts[k][0]}:${parts[k][1]}`));
+              return;
+            }
+            appendIdx(o.node, 'dataMods', i);
+            addClass(o.node, 'mdr-mod');
+            for (const c of group.slice(1)) appendIdx(c.node, 'dataModCont', i);
             // Blocks continuing the change are rendered inside the owner's inline diff, whole.
+            const reach = Math.max(...group.map((b) => b.el));
             if (reach > o.el) o.node.properties.dataModEl = Math.max(Number(o.node.properties.dataModEl ?? 0), reach);
             return;
           }
