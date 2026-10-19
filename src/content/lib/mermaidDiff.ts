@@ -28,40 +28,74 @@ const splitLines = (value: string) => {
 };
 
 /**
+ * The line without its bracketed node labels / shapes (bracket pairs removed inside-out),
+ * whitespace collapsed: the same node or edge however it is labelled. `|edge labels|` stay,
+ * so a relabelled edge still yields a removed + an added edge.
+ */
+const shapeKey = (l: string) => {
+  let s = l.trim();
+  for (let prev = ''; prev !== s; ) {
+    prev = s;
+    s = s.replace(/\[[^[\]]*\]|\([^()]*\)|\{[^{}]*\}/g, '');
+  }
+  return s.replace(/\s+/g, ' ');
+};
+
+const take = (m: Map<string, number>, k: string) => {
+  const n = m.get(k) ?? 0;
+  if (n > 0) m.set(k, n - 1);
+  return n > 0;
+};
+const add = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
+
+/**
  * Union of both versions of a flowchart, in order: everything in the new version plus the
  * removed lines that still make sense on their own (nodes, edges). Removed blank lines,
  * structural / styling lines (so a removed subgraph loses its `subgraph … end` frame but keeps
- * the nodes inside) and lines that merely moved are left out, so the new header line wins.
+ * the nodes inside) and lines that merely moved or only changed a node's label / shape are
+ * left out, so the new header line wins and a relabelled node is declared once, with its new
+ * label. Each added line pairs with at most one removed line: first verbatim, then by shape.
  * Removed lines are kept verbatim, indentation included.
  */
 export function mergedSource(oldText: string, newText: string): string {
   const parts = diffLines(normalizeSource(oldText), normalizeSource(newText));
-
-  // A removed line whose text shows up again among the added lines moved; keep the added copy only.
-  const owedByAdded = new Map<string, number>();
-  for (const p of parts) {
-    if (!p.added) continue;
-    for (const l of splitLines(p.value)) owedByAdded.set(l.trim(), (owedByAdded.get(l.trim()) ?? 0) + 1);
-  }
-
-  const out: string[] = [];
+  const lines: { text: string; removed: boolean }[] = [];
+  const owedExact = new Map<string, number>();
+  const owedShape = new Map<string, number>();
   for (const p of parts) {
     for (const l of splitLines(p.value)) {
-      if (!p.removed) {
-        out.push(l);
-        continue;
+      if (p.removed && (!l.trim() || STRUCTURAL.test(l))) continue;
+      lines.push({ text: l, removed: !!p.removed });
+      if (p.added) {
+        add(owedExact, l.trim());
+        add(owedShape, shapeKey(l));
       }
-      const key = l.trim();
-      if (!key || STRUCTURAL.test(l)) continue;
-      const owed = owedByAdded.get(key) ?? 0;
-      if (owed > 0) {
-        owedByAdded.set(key, owed - 1);
-        continue;
-      }
-      out.push(l);
     }
   }
-  return out.join('\n');
+  const removed = lines.filter((e) => e.removed);
+  const drop = new Set<(typeof lines)[number]>();
+  // A removed line that reappears verbatim among the added lines merely moved: keep the added copy only.
+  for (const e of removed) {
+    if (take(owedExact, e.text.trim())) {
+      drop.add(e);
+      take(owedShape, shapeKey(e.text));
+    }
+  }
+  // One that differs from an added line only by node labels / shapes was relabelled: the added line shows it.
+  for (const e of removed) if (!drop.has(e) && take(owedShape, shapeKey(e.text))) drop.add(e);
+  return lines
+    .filter((e) => !drop.has(e))
+    .map((e) => e.text)
+    .join('\n');
+}
+
+/**
+ * Percentage widths that draw a Before / After pair at one scale: the wider diagram fills
+ * its pane, the narrower one takes the share its viewBox width gives it.
+ */
+export function pairWidths(before: number, after: number): [number, number] {
+  const max = Math.max(before, after, 1);
+  return [(before / max) * 100, (after / max) * 100];
 }
 
 export interface GraphDiff {

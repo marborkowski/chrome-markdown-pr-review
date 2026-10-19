@@ -219,6 +219,31 @@ describe('mermaid blocks', () => {
     expect(strip(html).match(/flowchart TD/g)).toHaveLength(1);
   });
 
+  it('recovers the old code of a diagram inside a blockquote or an alert', () => {
+    const quote = (s: string, head = '') => head + s.split('\n').map((l) => '> ' + l).join('\n') + '\n';
+    const after = flow.replace('B', 'C');
+    for (const head of ['', '> [!NOTE]\n']) {
+      const before = quote(flow, head);
+      const now = quote(after, head);
+      for (const html of [render(now, { diff: patchOf(before, now) }), inline(before, now)]) {
+        expect(html).toContain('mdr-mermaid');
+        expect(html).toContain('>Changes<');
+        expect(html).toContain('>Before<');
+      }
+    }
+  });
+
+  it('recovers the old code when the replacement starts with a blank line added above the fence', () => {
+    const diff = parsePatch('@@ -1,5 +1,6 @@\n Text\n-``` mermaid\n+\n+```mermaid\n graph TD\n-  A --> B\n+  A --> C\n ```');
+    const src = 'Text\n\n```mermaid\ngraph TD\n  A --> C\n```';
+    for (const inlineDiff of [false, true]) {
+      const html = render(src, { diff, inlineDiff });
+      expect(html).toContain('mdr-mermaid');
+      expect(html).toContain('>Changes<');
+      expect(html).toContain('>Before<');
+    }
+  });
+
   it('leaves other code blocks alone', () => {
     const html = render('```js\nconst a = 1;\n```\n');
     expect(html).not.toContain('mdr-mermaid');

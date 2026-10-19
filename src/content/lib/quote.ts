@@ -27,7 +27,9 @@ function serialize(node: Node, inCode: boolean, out: string[]) {
   if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
   const el = node as Element;
   if (el.nodeType === Node.ELEMENT_NODE) {
-    if (el.classList.contains('mdr-gutter')) return; // badges aren't part of the text
+    // SVG elements keep a lowercase tagName, so match on localName: mermaid's <style> / markers aren't text.
+    if (['style', 'script', 'title', 'desc', 'defs'].includes(el.localName)) return;
+    if (el.matches('.mdr-gutter, .mdr-mermaid-bar, .mdr-mermaid-caption, .mdr-mermaid-loading, .mdr-banner')) return; // UI chrome
     if (el.tagName === 'BR') return void out.push('\n');
     if (el.tagName === 'DEL') {
       const inner: string[] = [];

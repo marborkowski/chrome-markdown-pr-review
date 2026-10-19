@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import { isFlowchart, parseMermaid, renderMermaid, type MermaidGraph, type Theme } from '../lib/mermaid';
-import { diffDirectives, graphDiff, labelDiff, mergedSource, normalizeLabel, type DiffColors } from '../lib/mermaidDiff';
+import { diffDirectives, graphDiff, labelDiff, mergedSource, normalizeLabel, pairWidths, type DiffColors } from '../lib/mermaidDiff';
+import { hardenSvg, linkHref } from '../lib/svgHarden';
 
 export interface MermaidBlockProps {
   /** The block's new code, fences stripped. */
@@ -15,6 +16,10 @@ export interface MermaidBlockProps {
   gutter: ReactNode;
   /** data-sl, data-el, data-block, className, … of the block, spread on the wrapper so anchoring and change markers keep working. */
   attrs: Record<string, unknown>;
+  /** Resolves a link authored in the diagram (`click A "docs/x.md"`) like a document link. */
+  resolveUrl?: (url: string, key: string) => string;
+  /** Opens a link to another file of the PR inside the review; true when handled. */
+  onLink?: (href: string) => boolean;
 }
 
 type View = 'changes' | 'after' | 'before' | 'source';
@@ -25,9 +30,10 @@ const COLORS: Record<Theme, DiffColors> = {
   dark: { addedFill: '#12361f', addedStroke: '#3fb950', removedFill: '#3c1618', removedStroke: '#f85149', changedFill: '#3b2e00', changedStroke: '#d29922' },
 };
 
-/** One diagram of a Before / After pair: its markup, or why it couldn't be drawn. */
+/** One diagram of a Before / After pair: its markup and natural width, or why it couldn't be drawn. */
 interface Pane {
   svg?: string;
+  width?: number;
   error?: string;
 }
 
@@ -61,7 +67,8 @@ const views = new Map<string, Promise<Rendered>>();
 const settled = new Map<string, Rendered>();
 
 const graphOf = (text: string) => memo(graphs, text, () => serial(() => parseMermaid(text)));
-const svgOf = (text: string, theme: Theme, container: Element) => memo(svgs, `${theme}\n${text}`, () => serial(() => renderMermaid(text, theme, container)));
+const svgOf = (text: string, theme: Theme, container: Element) =>
+  memo(svgs, `${theme}\n${text}`, () => serial(() => renderMermaid(text, theme, container)).then(hardenSvg));
 const paneOf = (text: string, theme: Theme, container: Element): Promise<Pane> =>
   svgOf(text, theme, container).then(
     (svg) => ({ svg }),
@@ -76,6 +83,14 @@ const parseSvg = (svg: string) => {
   tpl.innerHTML = svg;
   return tpl;
 };
+
+/** The diagram's natural width: its viewBox width, else mermaid's inline max-width; 0 when unknown. */
+function naturalWidth(svg: Element | null): number {
+  if (!svg) return 0;
+  const vb = (svg.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+  if (vb.length === 4 && vb[2] > 0) return vb[2];
+  return parseFloat((svg as SVGElement).style?.maxWidth) || 0;
+}
 
 /** Tags the group drawing each label in `labels` (or the text itself) with `cls`. */
 function markLabels(tpl: HTMLTemplateElement, labels: Set<string>, cls: string): string {
@@ -111,6 +126,8 @@ async function renderChanges(oldText: string, newText: string, theme: Theme, con
   if (before.svg && after.svg) {
     const b = parseSvg(before.svg);
     const a = parseSvg(after.svg);
+    before.width = naturalWidth(b.content.querySelector('svg'));
+    after.width = naturalWidth(a.content.querySelector('svg'));
     const labels = (tpl: HTMLTemplateElement) => labelElements(tpl.content).map((el) => el.textContent ?? '');
     const d = labelDiff(labels(b), labels(a));
     before.svg = markLabels(b, d.removed, 'mdr-svg-removed');
@@ -128,7 +145,10 @@ function renderView(view: View, source: string, oldSource: string | null, theme:
       view === 'changes'
         ? await renderChanges(oldSource!, source, theme, container)
         : { kind: 'single' as const, svg: await svgOf(view === 'before' ? oldSource! : source, theme, container) };
-    settled.set(key, r);
+    // A pane that failed may have failed for a transient reason (loader, detached container):
+    // forget it so the next mount retries instead of showing the banner for the session.
+    if (r.kind === 'pair' && (r.before.error !== undefined || r.after.error !== undefined)) views.delete(key);
+    else settled.set(key, r);
     return r;
   });
 }
@@ -149,20 +169,66 @@ function useHostTheme(ref: RefObject<HTMLElement>): Theme | null {
   return theme;
 }
 
-function Svg({ svg }: { svg: string }) {
-  return <div className="mdr-mermaid-view" dangerouslySetInnerHTML={{ __html: svg }} />;
+// Layout effects never run on the server (react-dom/server renders the loading state), and must not warn there.
+const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
+/** Runs `fn` now and whenever the element's size changes. */
+function useResize(ref: RefObject<HTMLElement>, fn: () => void, deps: unknown[]) {
+  useIsoLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    fn();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(fn);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, deps);
 }
 
-function PaneView({ caption, pane }: { caption: string; pane: Pane }) {
+const VIEW_PADDING = 16;
+/** Below this scale labels stop being readable: show the diagram 1:1 and let the view scroll instead. */
+const MIN_SCALE = 0.6;
+
+/**
+ * The diagram markup. mermaid sizes its SVG to 100% of the view capped at its natural width;
+ * a wide diagram that would shrink past MIN_SCALE is shown at its natural size (scrolling),
+ * and `share` (a Before / After pane's part of the wider diagram) keeps a pair at one scale.
+ */
+function Svg({ svg, old, share = 1 }: { svg: string; old?: boolean; share?: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useResize(
+    ref,
+    () => {
+      const view = ref.current;
+      const el = view?.querySelector('svg');
+      if (!view || !el) return;
+      const natural = naturalWidth(el);
+      const room = (view.clientWidth - VIEW_PADDING) * share;
+      if (natural && room > 0 && room / natural < MIN_SCALE) {
+        el.style.maxWidth = 'none';
+        el.style.width = `${natural}px`;
+      } else {
+        el.style.maxWidth = natural ? `${natural}px` : '';
+        el.style.width = `${share * 100}%`;
+      }
+    },
+    [svg, share],
+  );
+  return <div ref={ref} className={`mdr-mermaid-view${old ? ' mdr-mermaid-old' : ''}`} dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+function PaneView({ caption, pane, old, share }: { caption: string; pane: Pane; old?: boolean; share: number }) {
   return (
     <div className="mdr-mermaid-pane">
       <div className="mdr-mermaid-caption">{caption}</div>
-      {pane.svg !== undefined ? <Svg svg={pane.svg} /> : <div className="mdr-banner mdr-banner-del">Couldn't render the diagram: {pane.error}</div>}
+      {pane.svg !== undefined ? <Svg svg={pane.svg} old={old} share={share} /> : <div className="mdr-banner mdr-banner-del">Couldn't render the diagram: {pane.error}</div>}
     </div>
   );
 }
 
-export function MermaidBlock({ source, oldSource, changed, sourceView, gutter, attrs }: MermaidBlockProps) {
+const PAIR_GAP = 12;
+
+export function MermaidBlock({ source, oldSource, changed, sourceView, gutter, attrs, resolveUrl, onLink }: MermaidBlockProps) {
   const { className, ...rest } = attrs;
   const hasBefore = oldSource !== null;
   const hasChanges = hasBefore && changed;
@@ -190,6 +256,30 @@ export function MermaidBlock({ source, oldSource, changed, sourceView, gutter, a
   const current = state.key === key ? state : settled.has(key) ? { key, result: settled.get(key) } : null;
   const result = current?.result;
 
+  // A Before / After pair sits side by side only while the wider diagram fits half the block at full scale.
+  const pairWidth = result?.kind === 'pair' ? Math.max(result.before.width ?? 0, result.after.width ?? 0) : 0;
+  const [stack, setStack] = useState(false);
+  useResize(
+    ref,
+    () => {
+      if (!pairWidth || !ref.current) return;
+      setStack(pairWidth > (ref.current.clientWidth - PAIR_GAP) / 2 - VIEW_PADDING);
+    },
+    [pairWidth],
+  );
+
+  // Links authored in the diagram follow the document's link rules instead of navigating the GitHub tab.
+  const onClickCapture = (e: MouseEvent<HTMLDivElement>) => {
+    const a = (e.target as Element).closest?.('a');
+    if (!a || !a.closest('.mdr-mermaid-view')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const href = linkHref(a);
+    const url = resolveUrl ? resolveUrl(href, 'href') : href;
+    if (!url) return;
+    if (!onLink?.(url)) window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   let body: ReactNode;
   if (view === 'source') body = sourceView;
   else if (!key || !current) {
@@ -207,16 +297,17 @@ export function MermaidBlock({ source, oldSource, changed, sourceView, gutter, a
       </>
     );
   } else if (result.kind === 'pair') {
+    const [b, a] = pairWidths(result.before.width ?? 0, result.after.width ?? 0);
     body = (
-      <div className="mdr-mermaid-pair">
-        <PaneView caption="Before" pane={result.before} />
-        <PaneView caption="After" pane={result.after} />
+      <div className={`mdr-mermaid-pair${stack ? ' mdr-mermaid-stack' : ''}`}>
+        <PaneView caption="Before" pane={result.before} old share={b / 100} />
+        <PaneView caption="After" pane={result.after} share={a / 100} />
       </div>
     );
-  } else body = <Svg svg={result.svg} />;
+  } else body = <Svg svg={result.svg} old={view === 'before'} />;
 
   return (
-    <div ref={ref} {...(rest as Record<string, any>)} className={`mdr-mermaid ${className ?? ''}`.trim()}>
+    <div ref={ref} {...(rest as Record<string, any>)} className={`mdr-mermaid ${className ?? ''}`.trim()} onClickCapture={onClickCapture}>
       <div className="mdr-mermaid-bar">
         <div className="mdr-seg" role="tablist">
           {options.map((v) => (

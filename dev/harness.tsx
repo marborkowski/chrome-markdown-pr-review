@@ -10,10 +10,13 @@ import readmePatch from './fixtures/readme.patch';
 import legacyPatch from './fixtures/legacy.patch';
 import flow from './fixtures/flow-head.md';
 import flowPatch from './fixtures/flow.patch';
+import { hardenSvg } from '../src/content/lib/svgHarden';
 
 declare global {
   interface Window {
     __calls: { method: string; path: string; body: unknown }[];
+    /** Exposed for dev/e2e.mjs: the DOM pass over diagram markup (vitest has no DOM to test it in). */
+    __hardenSvg: typeof hardenSvg;
   }
 }
 
@@ -58,6 +61,7 @@ const viewed: Record<string, boolean> = { 'README.md': true };
 const resolved = new Set<number>();
 
 window.__calls = [];
+window.__hardenSvg = hardenSvg;
 
 async function mock(req: ApiRequest): Promise<ApiResponse> {
   await new Promise((r) => setTimeout(r, 120));

@@ -20,7 +20,7 @@
    subgraph Fraud
      H[Score intent]
    end
-@@ -38,7 +38,7 @@
+@@ -39,7 +39,7 @@
  ```mermaid
  sequenceDiagram
    Gateway->>Payments: POST /payments

@@ -110,11 +110,22 @@ function mermaidSource(node: any): string | null {
 
 const MERMAID_FENCE = /^[ \t]*(`{3,}|~{3,})[ \t]*mermaid\b/i;
 
-/** The code of the ```mermaid block in `text`, or null when there is none (the block counts as brand new). */
+const QUOTE_MARKERS = /^(?:[ \t]*>)+/;
+
+/**
+ * The code of the ```mermaid block in `text`, or null when there is none (the block counts as
+ * brand new). Blockquote markers are stripped as deep as the opening fence is quoted, so a
+ * diagram inside a quote or alert is found and code lines that start with `>` stay intact.
+ */
 function oldMermaidSource(text: string): string | null {
-  const ls = text.split('\n');
-  const open = ls.findIndex((l) => MERMAID_FENCE.test(l));
+  let ls = text.split('\n');
+  const open = ls.findIndex((l) => MERMAID_FENCE.test(l.replace(/^(?:[ \t]*>)+[ \t]?/, '')));
   if (open < 0) return null;
+  const depth = (QUOTE_MARKERS.exec(ls[open])?.[0].match(/>/g) ?? []).length;
+  if (depth) {
+    const q = new RegExp(`^(?:[ \\t]*>){1,${depth}}[ \\t]?`);
+    ls = ls.map((l) => l.replace(q, ''));
+  }
   const fence = MERMAID_FENCE.exec(ls[open])![1];
   const closing = new RegExp(`^[ \\t]*${fence[0]}{${fence.length},}[ \\t]*$`);
   const close = ls.findIndex((l, i) => i > open && closing.test(l));
@@ -258,7 +269,7 @@ function makeBlock(Tag: string) {
     const pending = Number(props['data-pending'] ?? 0);
     const El = Tag as any;
     const mermaid = Tag === 'pre' ? mermaidSource(node) : null;
-    const oldMermaid = () => (ctx.diff ? oldMermaidSource(oldLines(ctx, sl, el).join('\n')) : null);
+    const oldMermaid = (start = sl, end = el) => (ctx.diff ? oldMermaidSource(oldLines(ctx, start, end).join('\n')) : null);
 
     if (ctx.inlineDiff && ctx.diff && Tag !== 'tr' && Tag !== 'table') {
       const change = changeOf(ctx, props, children, sl, el, mods);
@@ -271,7 +282,7 @@ function makeBlock(Tag: string) {
         const gutter = <Gutter threads={threads} pending={pending} mods={rest} sl={sl} el={el} />;
         if (mermaid !== null) {
           const sourceView = <pre><WordDiff oldText={oldText} newText={newText} /></pre>;
-          return <MermaidBlock source={mermaid} oldSource={oldMermaid()} changed sourceView={sourceView} gutter={gutter} attrs={attrs} />;
+          return <MermaidBlock source={mermaid} oldSource={oldMermaid(start, end)} changed sourceView={sourceView} gutter={gutter} attrs={attrs} resolveUrl={ctx.resolveUrl} onLink={ctx.onLink} />;
         }
         const Wrap = VOID_TAGS.has(Tag) ? 'div' : El; // the word diff needs an element that can hold it
         return (
@@ -287,7 +298,15 @@ function makeBlock(Tag: string) {
     const gutter = <Gutter threads={threads} pending={pending} mods={mods} sl={sl} el={el} />;
     if (mermaid !== null) {
       const changed = mods.length > 0 || /\bmdr-added\b/.test(props.className ?? '');
-      return <MermaidBlock source={mermaid} oldSource={changed ? oldMermaid() : null} changed={changed} sourceView={<pre>{children}</pre>} gutter={gutter} attrs={props} />;
+      let oldSource: string | null = null;
+      if (changed && ctx.diff) {
+        // The old code spans the block's own replacements too, which may start before it (a blank line added above the fence).
+        const repl = mods.flatMap((i) => ctx.diff!.removals[i]?.replacedBy ?? []);
+        const start = Math.min(sl, ...repl.map((r) => r.start));
+        const end = Math.max(el, Number(props['data-mod-el'] ?? 0), ...repl.map((r) => r.end));
+        oldSource = oldMermaid(start, end);
+      }
+      return <MermaidBlock source={mermaid} oldSource={oldSource} changed={changed} sourceView={<pre>{children}</pre>} gutter={gutter} attrs={props} resolveUrl={ctx.resolveUrl} onLink={ctx.onLink} />;
     }
     if (Tag === 'tr') {
       // <tr> may only contain cells: put the gutter inside the last cell.

@@ -6,6 +6,7 @@ import {
   labelDiff,
   mergedSource,
   normalizeLabel,
+  pairWidths,
   type DiffColors,
   type GraphShape,
 } from '../src/content/lib/mermaidDiff';
@@ -124,6 +125,42 @@ describe('mergedSource', () => {
     const oldSrc = 'graph TD\n  subgraph S\n    A\n  end\n  B';
     const newSrc = 'graph TD\n  subgraph S\n    A\n    B\n  end';
     expect(mergedSource(oldSrc, newSrc)).toBe(newSrc);
+  });
+
+  it('declares a node relabelled inline on an edge line once, so the edge is not duplicated', () => {
+    const oldSrc = 'flowchart TD\n  A[Old] --> B\n  B --> C';
+    const newSrc = 'flowchart TD\n  A[New] --> B\n  B --> C';
+    const merged = mergedSource(oldSrc, newSrc);
+    expect(merged).toBe('flowchart TD\n  A[New] --> B\n  B --> C');
+    const d = graphDiff(toy(oldSrc), toy(newSrc), toy(merged));
+    expect(d.changed).toEqual(['A']);
+    expect(toy(merged).edges).toHaveLength(2);
+    expect(mergedSource('graph TD\n  A -->|yes| B[Old]', 'graph TD\n  A -->|yes| B[New]')).toBe('graph TD\n  A -->|yes| B[New]');
+    expect(mergedSource('graph TD\n  A[Start] --> B', 'graph TD\n  A{Start} --> B')).toBe('graph TD\n  A{Start} --> B');
+  });
+
+  it('lets the new label win when a relabelled declaration moved before its old one', () => {
+    expect(
+      mergedSource('flowchart TD\n  A[Start] --> B[Validate]\n  B --> C[Done]', 'flowchart TD\n  C[Finished]\n  A[Start] --> B[Validate]\n  B --> C'),
+    ).toBe('flowchart TD\n  C[Finished]\n  A[Start] --> B[Validate]\n  B --> C');
+    expect(mergedSource('flowchart TD\n  A --> B\n  B[Old]', 'flowchart TD\n  B[New]\n  A --> B')).toBe('flowchart TD\n  B[New]\n  A --> B');
+  });
+
+  it('still keeps both lines of an edge whose label changed', () => {
+    expect(mergedSource('graph TD\n  A -->|yes| B', 'graph TD\n  A -->|no| B')).toBe('graph TD\n  A -->|yes| B\n  A -->|no| B');
+  });
+
+  it('pairs removed lines verbatim before pairing them by shape', () => {
+    expect(mergedSource('graph TD\n  X[Lbl] --> Y\n  X --> Y\n  M --> N', 'graph TD\n  M --> N\n  X --> Y')).toBe('graph TD\n  X[Lbl] --> Y\n  M --> N\n  X --> Y');
+  });
+});
+
+describe('pairWidths', () => {
+  it('scales the narrower diagram to its share of the wider one', () => {
+    expect(pairWidths(400, 800)).toEqual([50, 100]);
+    expect(pairWidths(600, 300)).toEqual([100, 50]);
+    expect(pairWidths(500, 500)).toEqual([100, 100]);
+    expect(pairWidths(0, 0)).toEqual([0, 0]);
   });
 });
 
