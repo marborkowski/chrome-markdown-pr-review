@@ -11,7 +11,7 @@
     "zip": "npm run build && cd dist && zip -qr ../markdown-pr-review.zip ."
   },
   "dependencies": {
-    "diff": "^8.0.2",
+    "diff": "^8.0.4",
     "github-markdown-css": "^5.8.1",
     "mermaid": "^12.2.0",
     "react": "^18.3.1",
@@ -28,10 +28,11 @@
     "@types/node": "^22.20.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "esbuild": "^0.24.2",
+    "esbuild": "^0.28.2",
     "playwright-core": "^1.49.1",
     "typescript": "^5.6.3",
-    "vitest": "^2.1.8"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
   },
   "private": true,
   "license": "MIT",
