@@ -1,5 +1,8 @@
-import { GITHUB_COM, graphqlUrl, loadHosts, originPatterns, type HostConfig } from '../shared/hosts';
-import type { ApiRequest, ApiResponse, RuntimeMessage } from '../shared/messages';
+import { GITHUB_COM, graphqlUrl, loadHosts, originPatterns, sameOrigin, type HostConfig } from '../shared/hosts';
+import type { ApiRequest, ApiResponse, DraftsRequest, RuntimeMessage } from '../shared/messages';
+
+// Tokens live in storage.local: keep it out of reach of content scripts (drafts go through handleDrafts).
+chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 
 // ---------------------------------------------------------------------------
 // GitHub API proxy. Tokens never leave the service worker / extension storage.
@@ -38,6 +41,7 @@ async function handleApi(req: ApiRequest): Promise<ApiResponse> {
 
   const out: any[] = [];
   for (let page = 0; page < 50; page++) {
+    if (!sameOrigin(url, host.apiBase)) return { ok: false, status: 0, error: `Refusing to send the token outside ${host.apiBase}.` };
     let res: Response;
     try {
       res = await fetch(url, {
@@ -89,6 +93,13 @@ async function handleApi(req: ApiRequest): Promise<ApiResponse> {
   return { ok: true, status: 200, data: out };
 }
 
+async function handleDrafts({ key, list }: DraftsRequest): Promise<unknown[] | void> {
+  const k = `pending:${key}`;
+  if (!list) return ((await chrome.storage.local.get(k))[k] as unknown[]) ?? [];
+  if (list.length) await chrome.storage.local.set({ [k]: list });
+  else await chrome.storage.local.remove(k);
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic content scripts for GitHub Enterprise hosts (github.com is static).
 // ---------------------------------------------------------------------------
@@ -136,9 +147,22 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // Messaging, toolbar button & keyboard shortcut.
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse) => {
+const extensionOrigin = new URL(chrome.runtime.getURL('')).origin;
+
+chrome.runtime.onMessage.addListener((msg: RuntimeMessage, sender, sendResponse) => {
+  // A GitHub tab may only act on its own instance (and its token); the options page on any.
+  const mayActOn = (origin: string) => sender.origin === extensionOrigin || sender.origin === origin;
   if (msg.type === 'api') {
+    if (!mayActOn(msg.origin)) {
+      sendResponse({ ok: false, status: 0, error: `${sender.origin} can't use the token of ${msg.origin}.` } satisfies ApiResponse);
+      return false;
+    }
     handleApi(msg).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'drafts') {
+    if (!msg.key.startsWith(`${sender.origin}/`)) return false;
+    handleDrafts(msg).then(sendResponse);
     return true;
   }
   if (msg.type === 'openOptions') {

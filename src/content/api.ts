@@ -1,4 +1,5 @@
-import type { ApiRequest, ApiResponse } from '../shared/messages';
+import type { ApiRequest, ApiResponse, DraftsRequest } from '../shared/messages';
+import { devHook } from './lib/devHook';
 import type { Commit, Compare, PendingComment, PrContext, PrFile, PullRequest, Review, ReviewComment, ThreadState } from './types';
 
 export class ApiError extends Error {
@@ -31,7 +32,7 @@ declare global {
 }
 
 async function call<T = any>(ctx: Pick<PrContext, 'origin'>, req: Omit<ApiRequest, 'type' | 'origin'>): Promise<T> {
-  const transport = window.__MDR_TRANSPORT__ ?? chromeTransport;
+  const transport = devHook('__MDR_TRANSPORT__') ?? chromeTransport;
   const res = await transport({ type: 'api', origin: ctx.origin, ...req });
   if (!res.ok) throw new ApiError(res.status, res.error, res.needsToken);
   return res.data as T;
@@ -218,25 +219,22 @@ export function openOptions(addOrigin?: string) {
 // Draft (pending) review comments, kept locally until the review is submitted.
 // ---------------------------------------------------------------------------
 
-const hasChromeStorage = () => typeof chrome !== 'undefined' && !!chrome.storage?.local;
+// Stored by the background worker: content scripts can't access chrome.storage.local, where the tokens live.
+const inExtension = () => typeof chrome !== 'undefined' && !!chrome.runtime?.id;
 
 export const drafts = {
   async load(key: string): Promise<PendingComment[]> {
-    const k = `pending:${key}`;
     try {
-      if (hasChromeStorage()) return ((await chrome.storage.local.get(k))[k] as PendingComment[]) ?? [];
-      return JSON.parse(localStorage.getItem(k) ?? '[]');
+      if (inExtension()) return ((await chrome.runtime.sendMessage({ type: 'drafts', key } satisfies DraftsRequest)) as PendingComment[]) ?? [];
+      return JSON.parse(localStorage.getItem(`pending:${key}`) ?? '[]');
     } catch {
       return [];
     }
   },
   async save(key: string, list: PendingComment[]) {
-    const k = `pending:${key}`;
     try {
-      if (hasChromeStorage()) {
-        if (list.length) await chrome.storage.local.set({ [k]: list });
-        else await chrome.storage.local.remove(k);
-      } else localStorage.setItem(k, JSON.stringify(list));
+      if (inExtension()) await chrome.runtime.sendMessage({ type: 'drafts', key, list } satisfies DraftsRequest);
+      else localStorage.setItem(`pending:${key}`, JSON.stringify(list));
     } catch { /* ignore */ }
   },
 };

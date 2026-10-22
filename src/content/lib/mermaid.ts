@@ -1,6 +1,7 @@
 // Loads mermaid lazily from dist/mermaid.js (a separate ESM bundle exposed through
 // web_accessible_resources) and wraps the two calls the diagram UI needs: parsing a
 // diagram into its vertices/edges and rendering it to SVG markup.
+import { devHook } from './devHook';
 
 declare global {
   interface Window {
@@ -38,7 +39,7 @@ let counter = 0;
 export function loadMermaid(): Promise<any> {
   if (!loading) {
     loading = (async () => {
-      const url = window.__MDR_MERMAID_URL__ ?? chrome.runtime.getURL('mermaid.js');
+      const url = devHook('__MDR_MERMAID_URL__') ?? chrome.runtime.getURL('mermaid.js');
       const mod = await import(/* @vite-ignore */ url);
       const mermaid = mod.default;
       mermaid.initialize({ ...baseConfig, theme: themeName(lastTheme) });

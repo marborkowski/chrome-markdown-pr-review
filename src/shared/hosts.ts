@@ -5,7 +5,7 @@ export interface HostConfig {
   origin: string;
   /** REST API base, e.g. https://api.github.com or https://github.acme.corp/api/v3 */
   apiBase: string;
-  /** Personal access token (stored only in chrome.storage.local). */
+  /** Personal access token (stored only in chrome.storage.local, which content scripts can't read). */
   token?: string;
 }
 
@@ -30,6 +30,8 @@ export function graphqlUrl(apiBase: string): string {
   if (base.endsWith('/api/v3')) return base.slice(0, -'/api/v3'.length) + '/api/graphql';
   return base + '/graphql';
 }
+
+export const sameOrigin = (url: string, base: string) => new URL(url).origin === new URL(base).origin;
 
 export function originPatterns(h: HostConfig): string[] {
   const set = new Set([`${h.origin}/*`, `${new URL(h.apiBase).origin}/*`]);

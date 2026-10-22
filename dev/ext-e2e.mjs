@@ -111,6 +111,23 @@ const headLines = readFileSync('dev/fixtures/head.md', 'utf8').split('\n');
 assert.equal(c.body.line, headLines.findIndex((l) => l.includes('idempotency keys supplied')) + 1);
 assert.equal(await page.locator('.mdr-badge-thread').count(), 1);
 
+// The content script can't read the tokens, nor use another instance's token; drafts go through the worker.
+const cdp = await ctx.newCDPSession(page);
+const worlds = [];
+cdp.on('Runtime.executionContextCreated', (e) => worlds.push(e.context));
+await cdp.send('Runtime.enable');
+const contentWorld = worlds.find((w) => w.auxData?.type === 'isolated' && w.origin === `chrome-extension://${extId}`);
+const inContentScript = async (expression) =>
+  (await cdp.send('Runtime.evaluate', { expression, contextId: contentWorld.id, awaitPromise: true, returnByValue: true })).result.value;
+assert.match(await inContentScript(`chrome.storage.local.get('hosts').then(() => 'read', (e) => e.message)`), /not allowed/);
+const foreign = await inContentScript(`chrome.runtime.sendMessage({ type: 'api', origin: 'https://github.com', path: '/user' })`);
+assert.match(foreign.error, /can't use the token/);
+const draft = [{ id: 'd1', body: 'draft' }];
+await inContentScript(`chrome.runtime.sendMessage({ type: 'drafts', key: '${origin}/acme/payments#42', list: ${JSON.stringify(draft)} })`);
+assert.deepEqual(await inContentScript(`chrome.runtime.sendMessage({ type: 'drafts', key: '${origin}/acme/payments#42' })`), draft);
+assert.equal(await inContentScript(`chrome.runtime.sendMessage({ type: 'drafts', key: 'https://github.com/acme/payments#42' })`), undefined);
+await inContentScript(`chrome.runtime.sendMessage({ type: 'drafts', key: '${origin}/acme/payments#42', list: [] })`);
+
 // Escape closes the overlay even when focus fell back to the page.
 await page.keyboard.press('Escape');
 await page.locator('.mdr-launcher').waitFor();

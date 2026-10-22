@@ -46,6 +46,7 @@ const inlineMath = (value: string, position?: Position): InlineMath => ({
   data: { hName: 'code', hProperties: { className: ['language-math', 'math-inline'] }, hChildren: [{ type: 'text', value }] },
 });
 import { visit } from 'unist-util-visit';
+import { devHook } from './devHook';
 
 declare global {
   interface Window {
@@ -130,7 +131,7 @@ let loading: Promise<Katex> | undefined;
 export function loadKatex(): Promise<Katex> {
   if (!loading) {
     loading = (async () => {
-      const url = window.__MDR_KATEX_URL__ ?? chrome.runtime.getURL('katex.js');
+      const url = devHook('__MDR_KATEX_URL__') ?? chrome.runtime.getURL('katex.js');
       return (await import(/* @vite-ignore */ url)) as Katex;
     })();
     loading.catch(() => {

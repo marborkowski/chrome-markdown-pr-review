@@ -85,7 +85,7 @@ The header holds the **Rendered / Split / Source** switch, the **View** menu (*W
 
 ## Install
 
-The extension is built from source and loaded unpacked. You need **Node.js 18 or newer** (with npm) and **Chrome 110 or newer**:
+The extension is built from source and loaded unpacked. You need **Node.js 18 or newer** (with npm) and **Chrome 140 or newer**:
 
 ```bash
 npm install
@@ -256,7 +256,7 @@ CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" node dev
 
 ## Privacy
 
-- Tokens are stored only in the browser's extension storage (`chrome.storage.local`). Only the background service worker reads them, and it sends each token only to the API URL of its own GitHub instance. They are never exposed to the GitHub page.
+- Tokens are stored only in the browser's extension storage (`chrome.storage.local`). Only the background service worker and the Options page can read that storage (not the extension's script on GitHub pages). The worker sends each token only to the API URL of its own GitHub instance, and only for requests from a page of that instance (or from Options, to test the connection).
 - The extension talks to nothing but the GitHub instances you configure. There is no telemetry. While a review is open it checks the pull request for new commits and comments once a minute (conditional requests, which don't count against GitHub's rate limit when nothing changed).
 - Images in the documents are loaded the way the page loads them: from the repository on GitHub, and external image URLs directly (GitHub's own page proxies those through its image cache).
 - It runs on `github.com` out of the box; access to an Enterprise host is requested only when you add it in Options.
