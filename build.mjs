@@ -14,7 +14,7 @@ cpSync('static', outdir, { recursive: true });
 const common = {
   bundle: true,
   format: 'iife',
-  target: ['chrome110'],
+  target: ['chrome140'],
   minify: !dev,
   sourcemap: dev ? 'inline' : false,
   legalComments: 'none',

@@ -16,7 +16,16 @@ export type ApiResponse =
   | { ok: true; status: number; data: any }
   | { ok: false; status: number; error: string; needsToken?: boolean };
 
+/** Loads the draft comments of a pull request, or replaces them when `list` is given. */
+export interface DraftsRequest {
+  type: 'drafts';
+  /** prKey(): starts with the web origin of the GitHub instance. */
+  key: string;
+  list?: unknown[];
+}
+
 export type RuntimeMessage =
   | ApiRequest
+  | DraftsRequest
   | { type: 'openOptions'; addOrigin?: string }
   | { type: 'toggle' };

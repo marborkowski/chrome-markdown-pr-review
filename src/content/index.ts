@@ -4,6 +4,7 @@
 import { ApiError, gh, openOptions } from './api';
 import { isMarkdown, prKey, type PrContext, type PrFile, type PullRequest } from './types';
 import launcherCss from './launcher.css';
+import { devHook } from './lib/devHook';
 import type { ReviewHandle, ReviewMountProps } from '../review/entry';
 
 declare global {
@@ -12,6 +13,7 @@ declare global {
     __MDR_DEV_CTX__?: PrContext;
     /** The dev harness serves review.js itself. */
     __MDR_REVIEW_URL__?: string;
+    __MDR_HARNESS__?: boolean;
   }
 }
 
@@ -24,7 +26,8 @@ function detectTheme(): 'light' | 'dark' {
 }
 
 function parseContext(): PrContext | null {
-  if (window.__MDR_DEV_CTX__) return window.__MDR_DEV_CTX__;
+  const devCtx = devHook('__MDR_DEV_CTX__');
+  if (devCtx) return devCtx;
   const m = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/.exec(location.pathname);
   if (!m) return null;
   return { origin: location.origin, owner: decodeURIComponent(m[1]), repo: decodeURIComponent(m[2]), number: Number(m[3]) };
@@ -39,7 +42,7 @@ type ReviewModule = { mountReview: (shadow: ShadowRoot, container: HTMLElement, 
 let reviewModule: Promise<ReviewModule> | undefined;
 function loadReview(): Promise<ReviewModule> {
   if (!reviewModule) {
-    const url = window.__MDR_REVIEW_URL__ ?? chrome.runtime.getURL('review.js');
+    const url = devHook('__MDR_REVIEW_URL__') ?? chrome.runtime.getURL('review.js');
     reviewModule = import(/* @vite-ignore */ url) as Promise<ReviewModule>;
     reviewModule.catch(() => (reviewModule = undefined));
   }
@@ -252,4 +255,4 @@ export function mount() {
   fetchPr();
 }
 
-if (!(window as any).__MDR_HARNESS__) mount();
+if (!devHook('__MDR_HARNESS__')) mount();
