@@ -800,6 +800,7 @@ export function Review({ ctx, pr, files, allFiles = files, onClose, onReload }: 
     else if (e.key === ']') switchFile(1);
     else if (e.key === '[') switchFile(-1);
     else if (e.key === 'v') toggleViewed();
+    else if (e.key === 'w' && mode !== 'rendered') notify('ok', 'Word diff is shown in the Rendered view (press 1)');
     else if (e.key === 'w') setOption('inline', !view.inline);
     else if (e.key === 'f') setOption('fold', !view.fold);
     else if (e.key === '1') switchMode('rendered');
