@@ -51,16 +51,23 @@ export function ViewMenu({ options, onChange, wordDiffApplies }: { options: View
   return (
     <Dropdown label="View" title="View options" active={changed}>
       {() =>
-        VIEW_ITEMS.map((it) => (
-          <label key={it.key} className={`mdr-menu-item${it.key === 'inline' && !wordDiffApplies ? ' mdr-menu-off' : ''}`} title={it.hint}>
-            <input type="checkbox" checked={options[it.key]} onChange={(e) => onChange(it.key, e.target.checked)} />
-            <span>
-              {it.label}
-              {it.key2 && <kbd>{it.key2}</kbd>}
-              <small>{it.hint}</small>
-            </span>
-          </label>
-        ))
+        VIEW_ITEMS.map((it) => {
+          // Split and Source show whole lines side by side: there is no word diff to switch.
+          const off = it.key === 'inline' && !wordDiffApplies;
+          return (
+            <label key={it.key} className={`mdr-menu-item${off ? ' mdr-menu-off' : ''}`} title={it.hint}>
+              <input type="checkbox" checked={options[it.key]} disabled={off} onChange={(e) => onChange(it.key, e.target.checked)} />
+              <span>
+                {/* One row: the shortcut sits next to the label, as wide as its key. */}
+                <span>
+                  {it.label}
+                  {it.key2 && <kbd>{it.key2}</kbd>}
+                </span>
+                <small>{off ? 'Only in the Rendered view (1).' : it.hint}</small>
+              </span>
+            </label>
+          );
+        })
       }
     </Dropdown>
   );

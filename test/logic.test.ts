@@ -147,6 +147,13 @@ describe('cleanForInline', () => {
     expect(cleanForInline('p', 'one\ntwo\n\nthree')).toBe('one two\n\nthree');
     expect(cleanForInline('blockquote', '> a\n> b')).toBe('a b');
   });
+  it('keeps hard line breaks, written with a backslash', () => {
+    expect(cleanForInline('p', 'a\\\nb  \nc\nd')).toBe('a\\\nb\\\nc d');
+    expect(cleanForInline('li', '- a  \n  b')).toBe('a\\\nb');
+  });
+  it('drops the label of a footnote', () => {
+    expect(cleanForInline('p', '[^note]: The text.')).toBe('The text.');
+  });
   it('drops code fences (the <pre> element shows the code) but keeps front matter delimiters', () => {
     expect(cleanForInline('pre', '```js\nx\ny\n```')).toBe('x\ny');
     expect(cleanForInline('pre', 'x\ny')).toBe('x\ny');

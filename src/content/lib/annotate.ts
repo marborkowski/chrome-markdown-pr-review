@@ -1,6 +1,6 @@
 import type { Element, ElementContent, Root, Parent } from 'hast';
 import { visit } from 'unist-util-visit';
-import { similarity, splitRemoved, wordCounts } from './inlineDiff';
+import { similarity, splitRemoved, wordCounts, type BlockKind } from './inlineDiff';
 import type { DiffInfo, Removal } from './patch';
 import { isDelimiterRow, isTableLine, pairRows, sameRow, splitRow } from './tables';
 
@@ -11,9 +11,17 @@ export const BLOCK_TAGS = [
 ] as const;
 const BLOCK = new Set<string>(BLOCK_TAGS);
 const CONTAINERS = new Set(['ul', 'ol', 'table', 'blockquote', 'dl', 'details', 'div']);
-/** Sibling blocks of these kinds share out a replacement spanning them instead of folding it into the first one. */
-const SPLIT_TAGS = new Set(['li', 'p']);
-const hasBlocks = (n: Element): boolean => n.children.some((c) => c.type === 'element' && (BLOCK.has(c.tagName) || hasBlocks(c)));
+const kindOf = (n: Element): BlockKind => (n.tagName === 'pre' ? 'code' : n.tagName === 'hr' ? 'rule' : 'text');
+
+/** Start line of the first block nested inside `n` (a sub-list of a list item), if any. */
+function nestedStart(n: Element): number | undefined {
+  for (const c of n.children) {
+    if (c.type !== 'element') continue;
+    if (BLOCK.has(c.tagName) && c.position) return c.position.start.line;
+    const s = nestedStart(c);
+    if (s !== undefined) return s;
+  }
+}
 
 /**
  * Old and new text with too little in common for a word diff to help: a paragraph rewritten from
@@ -106,16 +114,20 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
       return best;
     };
     const isBlank = (line: number) => !(opts.lines[line - 1] ?? '').trim();
+    /** A block's own last line: a list item's text stops where its sub-list starts. */
+    const ownEl = (b: BlockRec) => Math.min(b.el, (nestedStart(b.node) ?? Infinity) - 1);
+    /** A block's own lines inside the head-file range [start, end]. */
+    const ownLines = (b: BlockRec, start: number, end: number) => opts.lines.slice(Math.max(b.sl, start) - 1, Math.min(ownEl(b), end));
 
-    /** Each block's slice of a replacement's removed lines when it spans sibling list items or paragraphs, else null. */
-    const splitAmong = (r: Removal, first: number, group: BlockRec[]) => {
+    /** Each block's slice of a replacement's removed lines when its new lines span several blocks, else null. */
+    const splitAmong = (r: Removal, group: BlockRec[]) => {
+      if (group.length < 2) return null;
+      const { start, end } = r.replacedBy!;
       const [o] = group;
       const last = group[group.length - 1];
-      if (group.length < 2 || !SPLIT_TAGS.has(o.node.tagName)) return null;
-      if (group.some((b) => b.node.tagName !== o.node.tagName || b.parent !== o.parent || hasBlocks(b.node))) return null;
-      const { start, end } = r.replacedBy!;
-      const shown = group.map((b) => opts.lines.slice(Math.max(b.sl, start) - 1, Math.min(b.el, end)));
-      return splitRemoved(r.lines, shown, o.node.tagName, o.sl < first, last.el > end);
+      const items = group.every((b) => b.node.tagName === 'li' && b.parent === o.parent);
+      const shown = group.map((b) => ownLines(b, start, end));
+      return splitRemoved(r.lines, shown, group.map((b) => kindOf(b.node)), items, o.sl < start, ownEl(last) > end);
     };
 
     const { diff } = opts;
@@ -224,45 +236,50 @@ export function rehypeAnnotate(opts: AnnotateOptions) {
           }
         }
         if (r.replacedBy) {
-          let first = -1;
-          for (let l = r.replacedBy.start; l <= r.replacedBy.end; l++) if (!isBlank(l)) { first = l; break; }
-          const o = first > 0 ? ownerOf(first) : null;
-          // Replaced by a container (raw HTML <details>, a callout, …) or by unrelated text: removed + added, not a word diff.
-          if (o && (CONTAINERS.has(o.node.tagName) || unrelated(r.lines, opts.lines.slice(r.replacedBy.start - 1, r.replacedBy.end)))) {
+          const { start, end } = r.replacedBy;
+          // The blocks the new lines belong to, in order.
+          const owners: BlockRec[] = [];
+          for (let l = start; l <= end; l++) {
+            const c = isBlank(l) ? null : ownerOf(l);
+            if (c && !owners.includes(c)) owners.push(c);
+          }
+          const [o] = owners;
+          // Replaced by a container (raw HTML <details>, a callout, …): removed + added, not a word diff.
+          if (o && CONTAINERS.has(o.node.tagName)) {
             inserts.push({ parent: o.parent, before: o.node, idx: i, more: [] });
             return;
           }
           if (o) {
-            const group = [o];
-            let cut = false;
-            for (let l = first + 1; l <= r.replacedBy.end; l++) {
-              if (isBlank(l)) continue;
-              const c = ownerOf(l);
-              if (!c || group.includes(c) || CONTAINERS.has(c.node.tagName)) continue;
-              // A code block can't be shown inside another block's word diff: a new one stays its own added block.
-              if (c.node.tagName === 'pre') {
-                cut = true;
-                break;
-              }
-              group.push(c);
-            }
-            const parts = splitAmong(r, first, group);
-            if (parts) {
-              // Each block shows its own share; the first one that had removed lines owns the change.
-              const owner = group.find((_, k) => parts[k][1] > parts[k][0]) ?? o;
-              appendIdx(owner.node, 'dataMods', i);
-              addClass(owner.node, 'mdr-mod');
-              group.forEach((b, k) => appendIdx(b.node, 'dataModPart', `${i}:${parts[k][0]}:${parts[k][1]}`));
+            // Containers show their changes through the blocks inside them; a new table row stays in its table.
+            const group = owners.filter((b) => !CONTAINERS.has(b.node.tagName) && b.node.tagName !== 'tr');
+            if (!group.length) group.push(o);
+            const parts = splitAmong(r, group);
+            // The blocks that show removed lines; the others are simply new.
+            const showing = parts ? group.filter((_, k) => parts[k][1] > parts[k][0]) : group;
+            const [owner] = showing;
+            // Replaced by unrelated text: removed + added, not a word diff.
+            if (unrelated(r.lines, showing.flatMap((b) => ownLines(b, start, end)))) {
+              inserts.push({ parent: owner.parent, before: owner.node, idx: i, more: [] });
               return;
             }
-            appendIdx(o.node, 'dataMods', i);
-            addClass(o.node, 'mdr-mod');
+            // The first block that shows removed lines owns the change.
+            appendIdx(owner.node, 'dataMods', i);
+            addClass(owner.node, 'mdr-mod');
+            if (parts) {
+              // Each block shows its own share.
+              group.forEach((b, k) => {
+                if (parts[k][1] === parts[k][0]) return;
+                addClass(b.node, 'mdr-mod');
+                appendIdx(b.node, 'dataModPart', `${i}:${parts[k][0]}:${parts[k][1]}`);
+              });
+              return;
+            }
             for (const c of group.slice(1)) appendIdx(c.node, 'dataModCont', i);
-            // The owner's share stops before the code block: all removed lines against the new lines up to it.
-            if (cut) appendIdx(o.node, 'dataModPart', `${i}:0:${r.lines.length}`);
+            // Blocks left out of the word diff (a new table) keep their place: the owner shows all removed lines against its own.
+            if (owners.length > group.length) appendIdx(owner.node, 'dataModPart', `${i}:0:${r.lines.length}`);
             // Blocks continuing the change are rendered inside the owner's inline diff, whole.
             const reach = Math.max(...group.map((b) => b.el));
-            if (reach > o.el) o.node.properties.dataModEl = Math.max(Number(o.node.properties.dataModEl ?? 0), reach);
+            if (reach > owner.el) owner.node.properties.dataModEl = Math.max(Number(owner.node.properties.dataModEl ?? 0), reach);
             return;
           }
         }

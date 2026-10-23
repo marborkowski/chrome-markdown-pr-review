@@ -12,7 +12,7 @@ import { remarkAdmonitions, remarkMdxEsm } from '../lib/admonitions';
 import { BLOCK_TAGS, rehypeAnnotate } from '../lib/annotate';
 import { rehypeFold } from '../lib/fold';
 import { findAnchor, rehypeCallouts, rehypeHeadingIds, rehypeSrcset, remarkAlerts, sanitizeSchema } from '../lib/gfm';
-import { LIST_MARKER, blockDiffSource, markdownDiffSource, rehypeDiffMarks, type RemovalParts } from '../lib/inlineDiff';
+import { LIST_MARKER, blockDiffSource, definitionsFor, diffContext, markdownDiffSource, rehypeDiffMarks, type DiffContext, type RemovalParts } from '../lib/inlineDiff';
 import { mathCached, rehypeMathMarks, remarkMathGuard, renderMath } from '../lib/math';
 import { isMermaidCode } from '../lib/mermaidDiff';
 import type { DiffInfo, Removal } from '../lib/patch';
@@ -33,6 +33,8 @@ interface DocCtxValue {
   diff: DiffInfo | null;
   lines: string[];
   inlineDiff: boolean;
+  /** What a word diff may refer to elsewhere in the file: link definitions, footnotes. */
+  diffContext: DiffContext;
   resolveUrl: UrlResolver;
   onBadge: (sl: number, el: number, side?: 'LEFT' | 'RIGHT') => void;
   onMods: (mods: number[], anchor: HTMLElement) => void;
@@ -169,16 +171,26 @@ function ImageEl({ node: _n, src, alt, className, title, ...props }: any) {
 const DIFF_INLINE = ['code', 'strong', 'em', 'del', 'ins', 'a', 'img', 'br', 'sup', 'sub', 'kbd', 's', 'b', 'i', 'q', 'samp', 'var', 'tt', 'span', 'strike', 'picture', 'source', 'ruby', 'rt', 'rp'];
 const diffComponents: Components = { a: DocLink, img: ImageEl, code: CodeEl };
 const diffRemark = [remarkGfm, [remarkMath, { singleDollarTextMath: true }], remarkMathGuard, remarkGemoji] as any;
+/** Footnote links like the file's own (#fn-…), which the sanitizer prefixes once. */
+const diffRemarkRehype = { clobberPrefix: '' };
 
 /** Word diff of a block's Markdown source, rendered as Markdown with insertions and deletions marked. */
 function MarkdownWordDiff({ oldText, newText }: { oldText: string; newText: string }) {
   const ctx = useContext(DocCtx);
-  const source = useMemo(() => markdownDiffSource(oldText, newText), [oldText, newText]);
-  const rehype = useMemo(() => [rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeMathMarks, [rehypeSrcset, ctx.resolveUrl], rehypeDiffMarks] as any, [ctx.resolveUrl]);
+  const { footnotes } = ctx.diffContext;
+  const source = useMemo(() => {
+    const merged = markdownDiffSource(oldText, newText);
+    return merged + definitionsFor(merged, ctx.diffContext);
+  }, [oldText, newText, ctx.diffContext]);
+  const rehype = useMemo(
+    () => [rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeMathMarks, [rehypeSrcset, ctx.resolveUrl], [rehypeDiffMarks, { footnotes }]] as any,
+    [ctx.resolveUrl, footnotes],
+  );
   return (
     <span className="mdr-worddiff mdr-worddiff-md">
       <ReactMarkdown
         remarkPlugins={diffRemark}
+        remarkRehypeOptions={diffRemarkRehype}
         rehypePlugins={rehype}
         allowedElements={DIFF_INLINE}
         unwrapDisallowed
@@ -195,22 +207,29 @@ function MarkdownWordDiff({ oldText, newText }: { oldText: string; newText: stri
  * Prepare source text for an inline word diff inside an already-rendered block:
  * drop block syntax the element itself renders (list markers, heading hashes, quote
  * markers) and turn soft line breaks into spaces, like the rendered paragraph does.
+ * Hard line breaks (a trailing backslash or two spaces) stay breaks.
  */
 export function cleanForInline(tag: string, text: string): string {
   if (tag === 'pre') return text.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*(\n|$)/, '').replace(/(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*$/, '');
   // Quote markers belong to the block quote itself or to one around this block.
   let lines = text.split('\n').map((l) => l.replace(/^(?:[ \t]*>)+[ \t]?/, ''));
   if (/^h[1-6]$/.test(tag)) lines = lines.map((l) => l.replace(/^\s*#{1,6}\s+/, '').replace(/\s+#+\s*$/, ''));
+  // A footnote's text: its label belongs to the footnote list.
+  if (tag === 'p') lines = lines.map((l) => l.replace(/^ {0,3}\[\^[^\]\s]+\]:[ \t]*/, ''));
   const out: string[] = [];
+  let hard = false;
   for (const raw of lines) {
     const isItem = tag === 'li' && LIST_MARKER.test(raw);
     const l = isItem ? raw.replace(LIST_MARKER, '') : raw.trim();
     if (!l) {
       if (out.length && out[out.length - 1] !== '') out.push('');
+      hard = false;
       continue;
     }
     if (isItem || !out.length || out[out.length - 1] === '') out.push(l);
+    else if (hard) out[out.length - 1] = out[out.length - 1].replace(/\s*\\?$/, '') + '\\\n' + l;
     else out[out.length - 1] += ' ' + l;
+    hard = /(?:\\| {2,})$/.test(raw);
   }
   return out.join('\n').replace(/\n{2,}/g, '\n\n').trim();
 }
@@ -490,8 +509,29 @@ function changeOf(ctx: DocCtxValue, props: any, children: any, sl: number, el: n
   const cutAt = nested.length ? Number(nested[0].props['data-sl']) : Infinity;
   const keepNested = cutAt <= end && reach < cutAt;
   const src = blockDiffSource(ctx.lines, removals, start, keepNested ? cutAt - 1 : end, parts);
-  const rest = own.filter((i) => !src.used.has(i));
-  return { start, end, src, nested, keepNested, rest };
+  return { start, end, src, nested, keepNested };
+}
+
+const TASK = /^(?:[ \t]*>)*[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[([ xX])\](?:[ \t]|$)/;
+
+/** The checkbox of a task-list item in its source: ticked or not, null when it has none. */
+function taskState(text: string): boolean | null {
+  const m = TASK.exec(text.split('\n').find((l) => l.trim()) ?? '');
+  return m ? m[1] !== ' ' : null;
+}
+
+/** A task-list item's checkbox next to its word diff; one ticked or unticked by the PR shows the old and the new state. */
+function TaskBox({ before, after }: { before: boolean | null; after: boolean | null }) {
+  const box = (checked: boolean) => <input type="checkbox" disabled checked={checked} />;
+  if (before === after) return after === null ? null : <>{box(after)} </>;
+  return (
+    <>
+      <span className="mdr-worddiff">
+        {before !== null && <del className="mdr-d-del">{box(before)}</del>}
+        {after !== null && <ins className="mdr-d-ins">{box(after)}</ins>}
+      </span>{' '}
+    </>
+  );
 }
 
 /** A table row deleted by the PR, struck out in its table. */
@@ -556,11 +596,12 @@ function makeBlock(Tag: string) {
       const change = changeOf(ctx, props, children, sl, el, mods);
       if (!change && cont.length) return null; // rendered as part of the block that starts the change
       if (change) {
-        const { start, end, src, nested, keepNested, rest } = change;
+        const { start, end, src, nested, keepNested } = change;
         const oldText = cleanForInline(Tag, src.oldText);
         const newText = cleanForInline(Tag, src.newText);
         const attrs = { ...props, 'data-sl': start, 'data-el': end, className: `${props.className ?? ''} mdr-inline` };
-        const gutter = <Gutter threads={threads} pending={pending} mods={rest} sl={sl} el={el} />;
+        // ± stays: the source diff shows what a word diff can't, like a link's new target.
+        const gutter = <Gutter threads={threads} pending={pending} mods={mods} sl={sl} el={el} />;
         if (mermaid !== null) {
           const sourceView = <pre><WordDiff oldText={oldText} newText={newText} /></pre>;
           return <MermaidBlock source={mermaid} oldSource={oldMermaid(start, end)} changed sourceView={sourceView} gutter={gutter} attrs={attrs} resolveUrl={ctx.resolveUrl} onLink={ctx.onLink} />;
@@ -569,6 +610,7 @@ function makeBlock(Tag: string) {
         const Wrap = VOID_TAGS.has(Tag) ? 'div' : El; // the word diff needs an element that can hold it
         return (
           <Wrap {...attrs}>
+            {Tag === 'li' && <TaskBox before={taskState(src.oldText)} after={taskState(src.newText)} />}
             {Tag === 'pre' ? <WordDiff oldText={oldText} newText={newText} /> : <MarkdownWordDiff oldText={oldText} newText={newText} />}
             {keepNested && nested}
             {gutter}
@@ -677,9 +719,13 @@ export const MarkdownDoc = memo(function MarkdownDoc(p: MarkdownDocProps) {
   const lines = useMemo(() => p.source.split(/\r?\n/), [p.source]);
   const leftThreadLines = p.leftThreadLines ?? NO_LINES;
   const broken = p.broken ?? NO_BROKEN;
+  const context = useMemo(() => diffContext(lines, p.diff?.removals.flatMap((r) => r.lines) ?? []), [lines, p.diff]);
   const ctx = useMemo<DocCtxValue>(
-    () => ({ diff: p.diff, lines, inlineDiff: p.inlineDiff, resolveUrl: p.resolveUrl, onBadge: p.onBadge, onMods: p.onMods, onLink: p.onLink, leftThreadLines, broken, assetChange: p.assetChange, onJump: p.onJump }),
-    [p.diff, lines, p.inlineDiff, p.resolveUrl, p.onBadge, p.onMods, p.onLink, leftThreadLines, broken, p.assetChange, p.onJump],
+    () => ({
+      diff: p.diff, lines, inlineDiff: p.inlineDiff, diffContext: context, resolveUrl: p.resolveUrl, onBadge: p.onBadge, onMods: p.onMods, onLink: p.onLink,
+      leftThreadLines, broken, assetChange: p.assetChange, onJump: p.onJump,
+    }),
+    [p.diff, lines, p.inlineDiff, context, p.resolveUrl, p.onBadge, p.onMods, p.onLink, leftThreadLines, broken, p.assetChange, p.onJump],
   );
   const remarkPlugins = useMemo(
     () =>

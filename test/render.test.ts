@@ -60,7 +60,8 @@ function patchOf(oldSrc: string, newSrc: string) {
 }
 
 const inline = (oldSrc: string, newSrc: string) => render(newSrc, { diff: patchOf(oldSrc, newSrc), inlineDiff: true });
-const strip = (html: string) => html.replace(/<[^>]+>/g, '');
+/** The text a reader sees, without the gutter's badges. */
+const strip = (html: string) => html.replace(/<span class="mdr-gutter"[\s\S]*?<\/span>/g, '').replace(/<[^>]+>/g, '');
 
 describe('inline word diff', () => {
   it('keeps the unchanged lines of a changed list item (GitHub diff vs. rendered diff)', () => {
@@ -150,11 +151,63 @@ describe('inline word diff', () => {
     expect(strip(ps[1])).toBe('The second one is shortlonger too.');
   });
 
-  it('still folds a change into the first block when the blocks are of different kinds', () => {
-    const before = 'The adapter is synchronous.';
-    const html = inline(before, 'The adapter is asynchronous.\n\n## Events');
-    expect(html).not.toContain('<h2');
-    expect(strip(html)).toContain('Events');
+  it('keeps new blocks of other kinds after a changed paragraph as blocks of their own', () => {
+    const html = inline(
+      '## Payments\n\nThe adapter is synchronous.',
+      '## Payments\n\nThe adapter is asynchronous.\n\n## Events\n\nEvery state change publishes an event:\n\n- `payment.created`\n- `payment.settled`',
+    );
+    const p = /<p[^>]*mdr-inline[^>]*>([\s\S]*?)<\/p>/.exec(html)![1];
+    expect(strip(p)).toBe('The adapter is synchronousasynchronous.');
+    expect(p).not.toContain('Events');
+    expect(html).toMatch(/<h2[^>]*class="mdr-added"[^>]*>Events/);
+    expect(html).toMatch(/<p[^>]*class="mdr-added"[^>]*>Every state change publishes an event:/);
+    expect(items(html).map(strip)).toEqual(['payment.created', 'payment.settled']);
+  });
+
+  it('keeps a list item changed with the sentence that introduces the list in its list', () => {
+    const html = inline('Configure the following:\n- `PORT` – the port\n- `HOST` – the host', 'Configure the following variables:\n- `PORT` – the port to listen on\n- `HOST` – the host');
+    const p = /<p[^>]*>([\s\S]*?)<\/p>/.exec(html)![1];
+    expect(strip(p)).toBe('Configure the following variables:');
+    const li = items(html);
+    expect(li).toHaveLength(2);
+    expect(strip(li[0])).toBe('PORT – the port to listen on');
+    expect(li[0]).toMatch(/<ins class="mdr-d-ins">[^<]*to listen on/);
+    const added = inline('Configure the following:\n- `HOST` – the host', 'Configure the following variables:\n- `PORT` – the port\n- `HOST` – the host');
+    expect(added).toMatch(/<li[^>]*class="mdr-added"[^>]*><code[^>]*>PORT<\/code> – the port<\/li>/);
+  });
+
+  it('gives a list item and its changed sub-item each their own word diff', () => {
+    const html = inline('- Parent item\n  - Child item\n- Other', '- Parent entry\n  - Child entry\n- Other');
+    expect(html).toMatch(/<li[^>]*mdr-inline[^>]*><span class="mdr-worddiff[^"]*">Parent <del class="mdr-d-del">item<\/del><ins class="mdr-d-ins">entry<\/ins><\/span><ul[^>]*>\s*<li[^>]*mdr-inline/);
+    expect(html).toMatch(/Child <del class="mdr-d-del">item<\/del><ins class="mdr-d-ins">entry<\/ins>/);
+  });
+
+  it('pairs the old text with the new block it matches, past new blocks inserted before it', () => {
+    const html = inline('Then deploy.', 'Build first:\n\n```sh\nnpm run build\n```\n\nThen deploy to prod.');
+    expect(html).toMatch(/<p[^>]*class="mdr-added"[^>]*>Build first:<\/p>/);
+    expect(html).toMatch(/<pre[^>]*class="mdr-added"[^>]*><code class="language-sh"/);
+    expect(html).toMatch(/<p[^>]*mdr-inline[^>]*>[\s\S]*Then deploy<ins class="mdr-d-ins"> to prod<\/ins>\./);
+  });
+
+  it('keeps the word diff of a code block when a paragraph is added after it', () => {
+    const html = inline('```js\nconst a = 1;\n```', '```js\nconst a = 2;\n```\n\nThe value changed.');
+    expect(html).toMatch(/<pre[^>]*mdr-inline[^>]*><span class="mdr-worddiff">[\s\S]*<del class="mdr-d-del">1<\/del><ins class="mdr-d-ins">2<\/ins>/);
+    expect(html).toMatch(/<p[^>]*class="mdr-added"[^>]*>The value changed\.<\/p>/);
+  });
+
+  it('keeps a new table out of the word diff of the paragraph before it', () => {
+    const html = inline('Limits apply.', 'Limits apply per merchant.\n\n| Plan | Limit |\n|---|---|\n| Free | 10 |');
+    const p = /<p[^>]*mdr-inline[^>]*>([\s\S]*?)<\/p>/.exec(html)![1];
+    expect(strip(p)).toBe('Limits apply per merchant.');
+    expect(html).toMatch(/<tr[^>]*class="mdr-added"/);
+  });
+
+  it('judges a rewrite by the block it pairs with, not by everything added after it', () => {
+    const para = 'Every payment request is validated by the gateway and then forwarded to the provider adapter for settlement.';
+    const more = Array.from({ length: 8 }, (_, i) => `Event ${i} is published to the bus whenever the payment changes state in the ledger.`).join(' ');
+    const html = inline(para, `${para.replace('validated', 'checked')}\n\n## Events\n\n${more}`);
+    expect(html).not.toContain('mdr-removed');
+    expect(html).toMatch(/<del class="mdr-d-del">validated<\/del><ins class="mdr-d-ins">checked<\/ins>/);
   });
 
   it('keeps a new code block after a rewritten paragraph as its own block', () => {
