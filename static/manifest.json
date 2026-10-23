@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Markdown PR Review",
   "short_name": "MD Review",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Review Markdown files in GitHub & GitHub Enterprise pull requests as rendered documents and comment on selected text.",
   "minimum_chrome_version": "140",
   "icons": {

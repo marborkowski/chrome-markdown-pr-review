@@ -1,6 +1,6 @@
 {
   "name": "markdown-pr-review",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Chrome extension: review Markdown files in GitHub / GitHub Enterprise pull requests as rendered documents and comment on selected text.",
   "scripts": {
     "build": "node build.mjs",
@@ -8,7 +8,7 @@
     "typecheck": "tsc",
     "test": "vitest run",
     "harness": "node build.mjs --dev --harness",
-    "zip": "npm run build && cd dist && zip -qr ../markdown-pr-review.zip ."
+    "zip": "npm run build && rm -f markdown-pr-review.zip && cd dist && zip -qr ../markdown-pr-review.zip . -x '.*' '*/.*'"
   },
   "dependencies": {
     "diff": "^8.0.4",
